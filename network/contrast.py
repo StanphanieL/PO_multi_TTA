@@ -15,17 +15,17 @@ class POContrast(nn.Module):
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
             nn.Linear(128, proj_dim, bias=True),
-        )
+        ) 
         self.global_pool = ME.MinkowskiGlobalAvgPooling()
 
     def forward_embed(self, feat_voxel, xyz_voxel):
         # build sparse tensor and extract features
         cuda_cur_device = torch.cuda.current_device()
         inputs = ME.SparseTensor(feat_voxel, xyz_voxel, device=f'cuda:{cuda_cur_device}')
-        voxel_feat = self.backbone(inputs)  # SparseTensor [#vox, C]
-        pooled = self.global_pool(voxel_feat)  # SparseTensor [B, C]
+        voxel_feat = self.backbone(inputs)  # SparseTensor [#vox, C] C:32
+        pooled = self.global_pool(voxel_feat)  # SparseTensor [B, C] B:batch_size
         x = pooled.F  # [B, C]
-        z = self.proj(x)
+        z = self.proj(x) #[32,128]
         z = F.normalize(z, dim=1)
         return z
 
@@ -45,18 +45,18 @@ class SupConLoss(nn.Module):
         B, V, D = features.shape
         feats = F.normalize(features.view(B * V, D), dim=1)  # [B*V, D]
         labels = labels.view(-1, 1)  # [B, 1]
-        mask = torch.eq(labels, labels.T).float().to(device)  # [B, B]
+        mask = torch.eq(labels, labels.T).float().to(device)  # [B, B] 构建正样本掩码
         mask = mask.repeat_interleave(V, dim=0).repeat_interleave(V, dim=1)  # [B*V, B*V]
-        logits = torch.div(torch.matmul(feats, feats.T), self.temperature)  # [B*V, B*V]
+        logits = torch.div(torch.matmul(feats, feats.T), self.temperature)  # [B*V, B*V] 计算所有特征向量之间的点积（余弦相似度）并除以温度参数，得到相似度分数矩阵
         # mask out self-contrast
-        logits_mask = torch.ones_like(mask) - torch.eye(B * V, device=device)
-        mask = mask * logits_mask
-        exp_logits = torch.exp(logits) * logits_mask
+        logits_mask = torch.ones_like(mask) - torch.eye(B * V, device=device) #全1矩阵，但对角线(自对比）为0
+        mask = mask * logits_mask # 将自对比位置从正样本掩码中移除
+        exp_logits = torch.exp(logits) * logits_mask #计算对数概率
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
         # mean of log-likelihood over positive
-        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-12)
-        loss = - mean_log_prob_pos
-        loss = loss.view(B, V).mean()
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-12) # 正样本平均对数概率
+        loss = - mean_log_prob_pos # 取负 最大化正样本对的相似度（拉进同类样本之间的距离）
+        loss = loss.view(B, V).mean() 
         return loss
 
 
@@ -94,6 +94,6 @@ class ProtoNCELoss(nn.Module):
 
     def forward(self, z: torch.Tensor, y: torch.Tensor, prototypes: torch.Tensor) -> torch.Tensor:
         # z: [N, D] normalized, prototypes: [K, D] normalized
-        logits = torch.matmul(z, prototypes.T) / self.temperature  # [N, K]
-        loss = F.cross_entropy(logits, y)
+        logits = torch.matmul(z, prototypes.T) / self.temperature  # [N, K] 样本特征与原型之间的相似度
+        loss = F.cross_entropy(logits, y) #鼓励模型将样本特征与其对应类别的原型对齐，同时原理其他类别的原型
         return loss

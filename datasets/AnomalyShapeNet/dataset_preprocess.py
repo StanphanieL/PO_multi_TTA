@@ -58,7 +58,7 @@ class Dataset:
         # augmentations
         self.NormalizeCoord = aug_transform.NormalizeCoord()
         self.CenterShift = aug_transform.CenterShift(apply_z=True)
-        self.RandomRotate_z = aug_transform.RandomRotate(angle=[-1, 1], axis="z", center=[0, 0, 0], p=1.0)
+        self.RandomRotate_z = aug_transform.RandomRotate(angle=[-1, 1], axis="z", center=[0, 0, 0], p=1.0) #p表示应用概率
         self.RandomRotate_y = aug_transform.RandomRotate(angle=[-1, 1], axis="y", p=1.0)
         self.RandomRotate_x = aug_transform.RandomRotate(angle=[-1, 1], axis="x", p=1.0)
         self.SphereCropMask = aug_transform.SphereCropMask(part_num=self.mask_num)
@@ -123,7 +123,7 @@ class Dataset:
     def contrastiveMerge(self, id):
         file_name = []
         labels = []
-        # view1
+        # view1  双视图 使用相同的数据增强流 但应用的具体变换参数不同
         xyz_voxel_1 = []
         feat_voxel_1 = []
         # view2
@@ -151,7 +151,7 @@ class Dataset:
             feat_voxel_1.append(f1)
             xyz_voxel_2.append(q2)
             feat_voxel_2.append(f2)
-
+        #将批次中所有的样本合并为一个批次
         xyz_voxel_1_batch, feat_voxel_1_batch = ME.utils.sparse_collate(xyz_voxel_1, feat_voxel_1)
         xyz_voxel_2_batch, feat_voxel_2_batch = ME.utils.sparse_collate(xyz_voxel_2, feat_voxel_2)
         labels = torch.from_numpy(np.array(labels)).long()

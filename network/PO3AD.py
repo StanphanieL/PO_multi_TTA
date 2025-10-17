@@ -8,23 +8,23 @@ import open3d as o3d
 
 class PONet(nn.Module):
     def __init__(self, in_channels, out_channels, num_classes: int = 0, class_embed_dim: int = 0, conditional_mode: str = 'concat'):
-        super(PONet, self).__init__()
+              super(PONet, self).__init__()
         self.backbone = unet3d(in_channels=in_channels, out_channels=out_channels, arch='MinkUNet34C')
-        self.num_classes = num_classes
-        self.conditional_mode = conditional_mode
+                                                                                                                                                                                                                                                                      self.num_classes = num_classes
+        self.conditional_mode = conditional_mode #类别信息与特征结合的方式
         self.class_embed_dim = class_embed_dim if (num_classes is not None and num_classes > 0 and class_embed_dim is not None and class_embed_dim > 0) else 0
         if self.class_embed_dim > 0:
-            self.class_embed = nn.Embedding(self.num_classes, self.class_embed_dim)
+            self.class_embed = nn.Embedding(self.num_classes, self.class_embed_dim) #初始化类别嵌入层，将类别ID映射为嵌入向量
             if self.conditional_mode == 'film':
-                self.film = nn.Linear(self.class_embed_dim, out_channels * 2)
+                self.film = nn.Linear(self.class_embed_dim, out_channels * 2) #初始化FiLM，用于生成类别条件的缩放和偏移
             else:
                 self.film = None
         else:
             self.class_embed = None
             self.film = None
-        feat_in = out_channels if (self.film is not None) else (out_channels + (self.class_embed_dim if self.class_embed is not None else 0))
+        feat_in = out_channels if (self.film is not None) else (out_channels + (self.class_embed_dim if self.class_embed is not None else 0)) #根据是否使用FiLM，确定输入特征的维度
         self.linear_offset = nn.Sequential(
-            nn.Linear(feat_in, out_channels, bias=False),
+            nn.Linear(feat_in, out_channels, bias=False),                                                                                                                                                            
             nn.BatchNorm1d(out_channels),
             nn.PReLU(),
             nn.Linear(out_channels, 16, bias=False),
@@ -49,7 +49,7 @@ class PONet(nn.Module):
         inputs = ME.SparseTensor(feat_voxel, xyz_voxel, device='cuda:{}'.format(cuda_cur_device))
         voxel_feat = self.backbone(inputs)
         point_feat = voxel_feat.F[v2p_v1]
-        if self.class_embed is not None and batch_count is not None and category_ids is not None:
+        if self.class_embed is not None and batch_count is not None and category_ids is not None: #类别条件融合
             # build per-point conditional embedding
             B = category_ids.shape[0]
             cond_list = []

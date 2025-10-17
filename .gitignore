@@ -61,7 +61,8 @@ Thumbs.db
 
 # Dataset files
 /datasets/AnomalyShapeNet/dataset/*
-/datasets/Real3D/dataset/*
+/datasets/Real3D/Real3D-AD-PCD/*
+/datasets/Real3D/Real3D-AD-PLY/*
 /datasets/*/dataset/*
 
 # Config cache

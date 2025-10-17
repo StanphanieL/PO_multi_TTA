@@ -46,12 +46,19 @@ def get_parser():
     parser.add_argument('--contrastive_ckpt', type=str, default='', help='path to contrastive checkpoint (with prototypes) for cluster assigner')
     parser.add_argument('--cluster_norm_type', type=str, default='minmax', help='cluster/category normalization for scores: minmax, zscore, mad')
     parser.add_argument('--metrics_csv', type=str, default='', help='optional path to save per-cluster/category metrics CSV')
+    parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
 
     # additional evaluation options
     parser.add_argument('--point_macro_ap', action='store_true', help='compute per-sample point-level AP and report macro average')
     parser.add_argument('--print_pos_rate', action='store_true', help='print positive rate (fraction of anomalous points) for global/cluster/category')
     parser.add_argument('--sample_norm', action='store_true', help='normalize scores within each sample (instead of cluster/category) when computing per-sample macro AP')
     parser.add_argument('--smooth_knn', type=int, default=0, help='kNN smoothing for point scores (k=0 disables)')
+
+    # AUPRO options
+    parser.add_argument('--compute_aupro', action='store_true', help='compute AUPRO (PRO area under FPR in a range)')
+    parser.add_argument('--aupro_fpr_max', type=float, default=0.3, help='FPR upper bound for AUPRO (e.g., 0.3 for 0~30%)')
+    parser.add_argument('--aupro_points', type=int, default=31, help='number of FPR points in [0, aupro_fpr_max]')
+    parser.add_argument('--region_knn', type=int, default=16, help='kNN for region connectivity among positive points')
 
     args = parser.parse_args()
     return args

@@ -8,7 +8,7 @@ def get_parser():
     parser.add_argument('--task', type=str, default='train', help='task: train, eval or contrastive')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
     parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
-    parser.add_argument('--num_works', type=int, default=12, help='num_works for dataset')
+    parser.add_argument('--num_works', type=int, default=0, help='num_works for dataset')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
     parser.add_argument('--logpath', type=str, default='./log/ashtray0/', help='path to save logs')
@@ -18,9 +18,9 @@ def get_parser():
     # #Dataset setting
     parser.add_argument('--dataset', type=str, default='AnomalyShapeNet', help='datasets')
     parser.add_argument('--category', type=str, default='ashtray0', help='category for single-class training')
-    parser.add_argument('--categories', type=str, default='', help='multi-categories training, e.g., "ashtray0,bottle0" or "all"')
+    parser.add_argument('--categories', type=str, default='all', help='multi-categories training, e.g., "ashtray0,bottle0" or "all"')
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size for single GPU')
-    parser.add_argument('--data_repeat', type=int, default=5, help='repeat the date for each epoch')
+    parser.add_argument('--data_repeat', type=int, default=10, help='repeat the date for each epoch')
     parser.add_argument('--mask_num', type=int, default=64)
 
     # #Adjust learning rate
@@ -38,22 +38,27 @@ def get_parser():
 
     # class-conditional offset head (stage 2)
     parser.add_argument('--class_embed_dim', type=int, default=32, help='class embedding dim for conditional offset head; set 0 to disable')
-    parser.add_argument('--conditional_mode', type=str, default='concat', help='conditional mode for offset head: concat or film')
+    parser.add_argument('--conditional_mode', type=str, default='film', help='conditional mode for offset head: concat or film') #将类别信息整合到偏移头中的方式
+    # warm start from contrastive backbone (stage 1)
+    parser.add_argument('--contrastive_backbone', type=str, default='',help='path to contrastive ckpt to init backbone for stage 2') #若不指定，则第二阶段backbone不做预加载，直接随机初始化
+    
 
     # #contrastive learning params (stage 1)
     parser.add_argument('--contrastive', action='store_true', help='enable contrastive training pipeline (stage 1)')
-    parser.add_argument('--proj_dim', type=int, default=128, help='projection head output dim for contrastive')
-    parser.add_argument('--temperature', type=float, default=0.05, help='temperature for SupCon/InfoNCE')
+    parser.add_argument('--proj_dim', type=int, default=128, help='projection head output dim for contrastive') #对比学习的投影头输出维度
+    parser.add_argument('--temperature', type=float, default=0.05, help='temperature for SupCon/InfoNCE') #较小的温度会使模型更关注难样本
     parser.add_argument('--proto_m', type=float, default=0.9, help='prototype momentum for moving average updates')
     parser.add_argument('--proto_loss_weight', type=float, default=0.2, help='weight for prototype NCE loss')
 
     # embedding visualization saving (stage 1)
-    parser.add_argument('--emb_save_samples', type=int, default=512, help='max number of embeddings to save per epoch for visualization')
-    parser.add_argument('--emb_save_every', type=int, default=1, help='save embedding snapshot every N epochs (stage 1)')
+    parser.add_argument('--emb_save_samples', type=int, default=2048, help='max number of embeddings to save per epoch for visualization')
+    parser.add_argument('--emb_save_every', type=int, default=100, help='save embedding snapshot every N epochs (stage 1)')
 
     # contrastive best checkpoint saving
-    parser.add_argument('--contrastive_best_metric', type=str, default='acc', help='metric to save best contrastive ckpt: acc or loss')
+    parser.add_argument('--contrastive_best_metric', type=str, default='loss', help='metric to save best contrastive ckpt: acc or loss')
+
+    # stage-2 best checkpoint saving
+    parser.add_argument('--stage2_best_metric', type=str, default='loss', help='metric to save best stage-2 ckpt (loss only)')
 
     args = parser.parse_args()
-    return args
     return args

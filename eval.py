@@ -116,6 +116,22 @@ def eval(cfgs):
     dataset = Dataset(cfg)
     num_classes = getattr(dataset, 'num_classes', 0)
 
+    # optional: restrict evaluation to a single category while keeping unified model
+    if getattr(cfg, 'eval_category_only', ''):
+        only_cat = cfg.eval_category_only
+        if hasattr(dataset, 'test_file_list'):
+            before = len(dataset.test_file_list)
+            filtered = []
+            for p in dataset.test_file_list:
+                # robust category extraction
+                parts = p.replace('\\', '/').split('/')
+                cat = parts[-3] if len(parts) >= 3 else ''
+                if cat == only_cat:
+                    filtered.append(p)
+            dataset.test_file_list = filtered
+            after = len(dataset.test_file_list)
+            print(f'Evaluating category-only subset: "{only_cat}" | samples: {after} (was {before})')
+
     model = net(cfg.in_channels, cfg.out_channels, num_classes=num_classes, class_embed_dim=cfg.class_embed_dim, conditional_mode=cfg.conditional_mode)
     model = model.cuda()
     load_checkpoint(model, cfg.logpath + cfg.checkpoint_name)
@@ -177,6 +193,7 @@ def eval(cfgs):
     pred_clusters = []
     true_cats = []
     sample_point_ap = []
+    xyz_list = []
 
     for i, batch in enumerate(dataset.test_data_loader):
         sample_path = batch['fn'][0]
@@ -220,6 +237,7 @@ def eval(cfgs):
         cond_ids = None if cond_cid < 0 else torch.tensor([cond_cid], dtype=torch.long).cuda()
         score, pred_mask = eval_fn(batch, model, category_ids=cond_ids)
         pred_mask = pred_mask.detach().cpu().abs().sum(dim=-1).numpy()
+        xyz_list.append(batch['xyz_original'].numpy())
         # optional kNN smoothing of point scores
         if getattr(cfg, 'smooth_knn', 0) and cfg.smooth_knn > 0:
             try:
@@ -279,6 +297,24 @@ def eval(cfgs):
         pos_rate_global = float(np.mean(gt_all))
         print(f'[Global] pos_rate={pos_rate_global:.6f}')
     print(f'[Global] object AUC-ROC: {auc_roc}, point AUC-ROC: {point_auc_roc}, object AUCP-PR: {auc_pr}, point AUCP-PR: {point_auc_pr}')
+
+    # Global AUPRO (optional)
+    if getattr(cfg, 'compute_aupro', False):
+        # normalize each sample's scores using global min-max for consistency
+        global_min, global_max = np.min(np.concatenate(pred_masks)), np.max(np.concatenate(pred_masks))
+        denom = (global_max - global_min) + 1e-12
+        scores_norm_list = [ (pm - global_min) / denom for pm in pred_masks ]
+        try:
+            from tools.aupro import aupro_curve
+            fpr_grid, pro_curve, aupro_area, aupro_norm = aupro_curve(
+                scores_norm_list, gt_masks, xyz_list=xyz_list,
+                fpr_max=getattr(cfg, 'aupro_fpr_max', 0.3),
+                num_fpr=getattr(cfg, 'aupro_points', 31),
+                region_knn=getattr(cfg, 'region_knn', 16),
+            )
+            print(f'[Global] AUPRO@FPR<= {getattr(cfg, "aupro_fpr_max", 0.3)} : area={aupro_area:.6f}, normalized={aupro_norm:.6f}')
+        except Exception as e:
+            print(f'[AUPRO] computation failed: {e}')
 
     # compute per-sample macro AP if requested
     if getattr(cfg, 'point_macro_ap', False) and len(sample_point_ap) == len(pred_masks):

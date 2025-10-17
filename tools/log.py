@@ -82,8 +82,12 @@ def checkpoint_restore(model, optimizer, logpath, epoch=0, dist=False, pretrain_
         map_location = {'cuda:0': 'cuda:{}'.format(gpu)} if gpu > 0 else None
         checkpoint = torch.load(pretrain_file, map_location=map_location)
         model_dict = checkpoint['model']
-        optimizer_dict = checkpoint['optimizer']
-        epoch = int(pretrain_file.split('/')[-1].split('.')[0])
+        optimizer_dict = checkpoint.get('optimizer', None)
+        # prefer epoch saved in checkpoint; fallback to filename
+        if 'epoch' in checkpoint:
+            epoch = int(checkpoint['epoch'])
+        else:
+            epoch = int(pretrain_file.split('/')[-1].split('.')[0])
         for k, v in model_dict.items():
             if 'module.' in k:
                 model_dict = {k[len('module.'):]: v for k, v in model_dict.items()}
@@ -93,10 +97,10 @@ def checkpoint_restore(model, optimizer, logpath, epoch=0, dist=False, pretrain_
         else:
             model.load_state_dict(model_dict, strict=False)
 
-        if optimizer != None:
+        if optimizer is not None and optimizer_dict is not None:
             optimizer.load_state_dict(optimizer_dict)
             for state in optimizer.state.values():
-                if state == None: continue
+                if state is None: continue
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.cuda()
@@ -111,7 +115,8 @@ def checkpoint_save(model, optimizer, logpath, epoch, save_freq=1):
     pretrain_file = os.path.join(logpath + '%09d' % epoch + '.pth')
     torch.save({
         'model': model.state_dict(),
-        'optimizer': optimizer.state_dict()
+        'optimizer': optimizer.state_dict() if optimizer is not None else None,
+        'epoch': epoch,
     }, pretrain_file)
     # remove previous checkpoints unless they are a power of 2 or a multiple of 16 to save disk space
     epoch = epoch - 1
@@ -125,7 +130,8 @@ def checkpoint_save_newest(model, optimizer, logpath, epoch, save_freq=1):
     pretrain_file = os.path.join(logpath + '%09d' % epoch + '.pth')
     torch.save({
         'model': model.state_dict(),
-        'optimizer': optimizer.state_dict()
+        'optimizer': optimizer.state_dict() if optimizer is not None else None,
+        'epoch': epoch,
     }, pretrain_file)
     # remove previous checkpoints unless they are a power of 2 or a multiple of 16 to save disk space
     epoch = epoch - 10
@@ -139,4 +145,4 @@ def print_error(message, user_fault=False):
     sys.stderr.write('ERROR: ' + str(message) + '\n')
     if user_fault:
       sys.exit(2)
-    sys.exit(-1)
+    sys.exit(-1)   
