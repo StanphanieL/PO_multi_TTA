@@ -39,11 +39,15 @@ class Dataset:
         # train files
         self.train_file_list = []  # list of (path, cat_id)
         for c in self.category_list:
-            data_list = glob.glob(f"datasets/Real3D/Real3D-AD-PLY/{c}/*.ply")
+            # data_list = glob.glob(f"datasets/Real3D/Real3D-AD-PLY/{c}/*.ply")
+            pattern = f"datasets/Real3D/Real3D-AD-PLY/{c}/*.ply"
+            data_list = glob.glob(pattern)
             is_train = re.compile(r'template')
             train_files = list(filter(is_train.search, data_list))
             train_files.sort()
             train_files = train_files * self.data_repeat
+            if len(train_files) == 0:
+                raise RuntimeError(f"[Real3D] No training templates found. Searched pattern={pattern} and filtered by 'template'. Category={c}")
             self.train_file_list += [(p, self.cat2id[c]) for p in train_files]
 
         # test files

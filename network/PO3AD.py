@@ -8,9 +8,9 @@ import open3d as o3d
 
 class PONet(nn.Module):
     def __init__(self, in_channels, out_channels, num_classes: int = 0, class_embed_dim: int = 0, conditional_mode: str = 'concat'):
-              super(PONet, self).__init__()
+        super(PONet, self).__init__()
         self.backbone = unet3d(in_channels=in_channels, out_channels=out_channels, arch='MinkUNet34C')
-                                                                                                                                                                                                                                                                      self.num_classes = num_classes
+        self.num_classes = num_classes
         self.conditional_mode = conditional_mode #类别信息与特征结合的方式
         self.class_embed_dim = class_embed_dim if (num_classes is not None and num_classes > 0 and class_embed_dim is not None and class_embed_dim > 0) else 0
         if self.class_embed_dim > 0:
@@ -53,19 +53,19 @@ class PONet(nn.Module):
             # build per-point conditional embedding
             B = category_ids.shape[0]
             cond_list = []
-            cat_emb = self.class_embed(category_ids.cuda())  # [B, D]
+            cat_emb = self.class_embed(category_ids.cuda())  # [B, D] 将类别ID转换为嵌入向量
             for b in range(B):
                 start = int(batch_count[b].item())
                 end = int(batch_count[b+1].item())
                 n = end - start
-                cond_list.append(cat_emb[b:b+1].repeat(n, 1))
+                cond_list.append(cat_emb[b:b+1].repeat(n, 1)) #为每个样本的所有点重复其类别嵌入向量
             cond = torch.cat(cond_list, dim=0)
-            if self.film is not None and self.conditional_mode == 'film':
+            if self.film is not None and self.conditional_mode == 'film': #条件特征融合
                 gamma_beta = self.film(cond)
                 gamma, beta = torch.chunk(gamma_beta, 2, dim=1)
                 point_feat = point_feat * (1 + gamma) + beta
             else:
-                point_feat = torch.cat([point_feat, cond], dim=1)
+                point_feat = torch.cat([point_feat, cond], dim=1) #concat模式拼接
         pred_offset = self.linear_offset(point_feat)
 
         return pred_offset

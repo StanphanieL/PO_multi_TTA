@@ -40,12 +40,16 @@ class Dataset:
         # build training file list across categories (template meshes)
         self.train_file_list = []  # list of (path, cat_id)
         for c in self.category_list:
-            data_list = glob.glob(f"datasets/AnomalyShapeNet/dataset/obj/{c}/*.obj")
+            # data_list = glob.glob(f"datasets/AnomalyShapeNet/dataset/obj/{c}/*.obj")
+            pattern = f"datasets/AnomalyShapeNet/dataset/obj/{c}/*.obj"
+            data_list = glob.glob(pattern)
             is_train = re.compile(r'template')
             train_files = list(filter(is_train.search, data_list))
             train_files.sort()
             # repeat per original design
             train_files = train_files * self.data_repeat
+            if len(train_files) == 0:
+                raise RuntimeError(f"[AnomalyShapeNet] No training templates found. Searched pattern={pattern} and filtered by 'template'. Category={c}")
             self.train_file_list += [(p, self.cat2id[c]) for p in train_files]
 
         # test files remain per-category, used in eval stage

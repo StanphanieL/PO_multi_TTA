@@ -32,6 +32,13 @@ def train_epoch(train_loader, model, model_fn, optimizer, epoch, max_batch_iter)
     end_time = time.time()  # initialization
     am_dict = {}
 
+     # log first round epoch and lr
+    try:
+        cur_lr = optimizer.param_groups[0]['lr']
+        logger.info(f"[Stage2] start epoch={epoch} lr={cur_lr}")
+    except Exception:
+        pass
+
     # #start train
     for i, batch in enumerate(train_loader):
         batch_time.update(time.time() - end_time)  # update time
@@ -95,6 +102,13 @@ def train_epoch_contrastive(train_loader, model, supcon_criterion, proto_module,
     end_time = time.time()
     am_loss = log.AverageMeter()
     am_acc = log.AverageMeter()
+
+    # log first round epoch and lr
+    try:
+        cur_lr = optimizer.param_groups[0]['lr']
+        logger.info(f"[Con] start epoch={epoch} lr={cur_lr}")
+    except Exception:
+        pass
 
     # collect embeddings across many batches for better visualization
     viz_z_list = []
@@ -168,11 +182,21 @@ def train_epoch_contrastive(train_loader, model, supcon_criterion, proto_module,
         t_m, t_s = divmod(remain_time, 60)
         t_h, t_m = divmod(t_m, 60)
         remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
-        sys.stdout.write("[Con] epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) acc: {:.3f} intra: {:.3f} inter: {:.3f}  data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n"
-                         .format(epoch, cfg.epochs, i + 1, len(train_loader), am_loss.val,
-                                 am_loss.avg, acc, intra, inter,
-                                 batch_time.val, batch_time.avg, iter_time.val, iter_time.avg,
-                                 remain_time=remain_time))
+        # sys.stdout.write("[Con] epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) acc: {:.3f} intra: {:.3f} inter: {:.3f}  data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {remain_time}\n"
+        #                  .format(epoch, cfg.epochs, i + 1, len(train_loader), am_loss.val,
+        #                          am_loss.avg, acc, intra, inter,
+        #                          batch_time.val, batch_time.avg, iter_time.val, iter_time.avg,
+        #                          remain_time=remain_time))
+        line = "[Con] epoch: {}/{} iter: {}/{} loss: {:.4f}({:.4f}) acc: {:.3f} intra: {:.3f} inter: {:.3f}  data_time: {:.2f}({:.2f}) iter_time: {:.2f}({:.2f}) remain_time: {}\n".format(
+            epoch, cfg.epochs, i + 1, len(train_loader), am_loss.val,
+            am_loss.avg, acc, intra, inter,
+            batch_time.val, batch_time.avg, iter_time.val, iter_time.avg,
+            remain_time)
+        sys.stdout.write(line)
+        try:
+            logger.info(line.strip())
+        except Exception:
+            pass
         if (i == len(train_loader) - 1): print()
 
     logger.info("[Con] epoch: {}/{}, train loss: {:.4f},  time: {}s".format(epoch, cfg.epochs, am_loss.avg,

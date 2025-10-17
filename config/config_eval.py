@@ -47,6 +47,7 @@ def get_parser():
     parser.add_argument('--cluster_norm_type', type=str, default='minmax', help='cluster/category normalization for scores: minmax, zscore, mad')
     parser.add_argument('--metrics_csv', type=str, default='', help='optional path to save per-cluster/category metrics CSV')
     parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
+    parser.add_argument('--metrics_md', type=str, default='', help='optional path to save console outputs (metrics/timing) into a markdown file')
 
     # additional evaluation options
     parser.add_argument('--point_macro_ap', action='store_true', help='compute per-sample point-level AP and report macro average')
@@ -59,6 +60,13 @@ def get_parser():
     parser.add_argument('--aupro_fpr_max', type=float, default=0.3, help='FPR upper bound for AUPRO (e.g., 0.3 for 0~30%)')
     parser.add_argument('--aupro_points', type=int, default=31, help='number of FPR points in [0, aupro_fpr_max]')
     parser.add_argument('--region_knn', type=int, default=16, help='kNN for region connectivity among positive points')
+
+    # Test-time augmentation (multi-view) options
+    parser.add_argument('--tta_views', type=int, default=0, help='number of TTA geometric views (0 disables)')
+    parser.add_argument('--tta_rotate_deg', type=float, default=5.0, help='max absolute rotation (degrees) around each axis for TTA')
+    parser.add_argument('--tta_scale', type=float, default=0.05, help='uniform scale jitter range [+/- tta_scale] for TTA')
+    parser.add_argument('--tta_jitter', type=float, default=0.002, help='Gaussian jitter sigma for TTA (applied per point)')
+    parser.add_argument('--tta_reduce', type=str, default='mean', help='reduce fused TTA scores: mean or max')
 
     args = parser.parse_args()
     return args
