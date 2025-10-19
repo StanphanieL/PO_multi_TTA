@@ -209,8 +209,8 @@ def eval(cfgs):
         tag = 'positive'
     elif cfg.dataset == 'Real3D':
         tag = 'good'
-    else:
-        tag = ''
+    # else:
+    #     tag = ''
 
     dataset.testLoader()
     print(f'Test samples: {len(dataset.test_file_list)}')
@@ -274,8 +274,8 @@ def eval(cfgs):
             true_id = -1
         true_cats.append(true_id)
 
-        # sample_name = sample_path.split('/')[-1].split('.')[0]
-        sample_name = Path(sample_path).stem
+        sample_name = sample_path.split('/')[-1].split('.')[0]
+        # sample_name = Path(sample_path).stem
 
         if tag in sample_name:
             gt_this = np.zeros(batch['xyz_original'].shape[0])
@@ -285,8 +285,19 @@ def eval(cfgs):
                 gt_mask_path = f'datasets/AnomalyShapeNet/dataset/pcd/{true_cat}/GT/'
                 gt_this = np.loadtxt(gt_mask_path + sample_name + '.txt', delimiter=',')[:, 3:].squeeze(1)
             elif cfg.dataset == 'Real3D':
+                # gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{true_cat}/gt/'
+                # gt_this = np.loadtxt(gt_mask_path + sample_name + '.txt')[:, 3:].squeeze(1)
                 gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{true_cat}/gt/'
-                gt_this = np.loadtxt(gt_mask_path + sample_name + '.txt')[:, 3:].squeeze(1)
+                gt_file = gt_mask_path + sample_name + '.txt'
+                try:
+                    arr = np.loadtxt(gt_file)
+                except Exception:
+                    arr = np.loadtxt(gt_file, delimiter=',')
+                # robust selection: if has >=4 columns, use last; else use last available
+                if arr.ndim == 1:
+                    gt_this = np.array(arr[-1:]).reshape(-1)
+                else:
+                    gt_this = arr[:, -1].reshape(-1)
             gt_masks.append(gt_this)
 
         # cluster prediction (before scoring) to decide conditioning id
