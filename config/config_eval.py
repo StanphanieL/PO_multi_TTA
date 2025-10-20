@@ -8,10 +8,10 @@ def get_parser():
     parser.add_argument('--task', type=str, default='eval', help='task: eval, contrastive_eval')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
     parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
-    parser.add_argument('--num_works', type=int, default=4, help='num_works for dataset')
+    parser.add_argument('--num_works', type=int, default=0, help='num_works for dataset')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
-    parser.add_argument('--logpath', type=str, default='./log/ashtray0/', help='path to save logs')
+    parser.add_argument('--logpath', type=str, default='./log/po3ad_cond_film_ashape_all_test2/best.pth', help='path to save logs')
     parser.add_argument('--validation', type=bool, default=False, help='Whether to verify the validation set')
     parser.add_argument('--checkpoint_name', type=str, default='', help='checkpoint name')
     parser.add_argument('--gpu_id', type=str, default='0', help='gpu id')
@@ -43,9 +43,9 @@ def get_parser():
     parser.add_argument('--contrastive_eval', action='store_true', help='run cluster evaluation with contrastive model')
     parser.add_argument('--proj_dim', type=int, default=128, help='projection head output dim for contrastive eval')
     parser.add_argument('--cluster_norm', action='store_true', help='use contrastive cluster assigner to normalize scores per-cluster and report per-cluster/category metrics in anomaly eval')
-    parser.add_argument('--contrastive_ckpt', type=str, default='', help='path to contrastive checkpoint (with prototypes) for cluster assigner')
+    parser.add_argument('--contrastive_ckpt', type=str, default='./log/contrast_ashape_all_test2/best.pth', help='path to contrastive checkpoint (with prototypes) for cluster assigner')
     parser.add_argument('--cluster_norm_type', type=str, default='minmax', help='cluster/category normalization for scores: minmax, zscore, mad')
-    parser.add_argument('--metrics_csv', type=str, default='', help='optional path to save per-cluster/category metrics CSV')
+    parser.add_argument('--metrics_csv', type=str, default='./result/metrics_debug.csv', help='optional path to save per-cluster/category metrics CSV')
     parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
     parser.add_argument('--metrics_md', type=str, default='', help='optional path to save console outputs (metrics/timing) into a markdown file')
 
@@ -53,7 +53,7 @@ def get_parser():
     parser.add_argument('--point_macro_ap', action='store_true', help='compute per-sample point-level AP and report macro average')
     parser.add_argument('--print_pos_rate', action='store_true', help='print positive rate (fraction of anomalous points) for global/cluster/category')
     parser.add_argument('--sample_norm', action='store_true', help='normalize scores within each sample (instead of cluster/category) when computing per-sample macro AP')
-    parser.add_argument('--smooth_knn', type=int, default=0, help='kNN smoothing for point scores (k=0 disables)')
+    parser.add_argument('--smooth_knn', type=int, default=16, help='kNN smoothing for point scores (k=0 disables)')
 
     # AUPRO options
     parser.add_argument('--compute_aupro', action='store_true', help='compute AUPRO (PRO area under FPR in a range)')
@@ -62,7 +62,7 @@ def get_parser():
     parser.add_argument('--region_knn', type=int, default=16, help='kNN for region connectivity among positive points')
 
     # Test-time augmentation (multi-view) options
-    parser.add_argument('--tta_views', type=int, default=0, help='number of TTA geometric views (0 disables)')
+    parser.add_argument('--tta_views', type=int, default=2, help='number of TTA geometric views (0 disables)')
     parser.add_argument('--tta_rotate_deg', type=float, default=5.0, help='max absolute rotation (degrees) around each axis for TTA')
     parser.add_argument('--tta_scale', type=float, default=0.05, help='uniform scale jitter range [+/- tta_scale] for TTA')
     parser.add_argument('--tta_jitter', type=float, default=0.002, help='Gaussian jitter sigma for TTA (applied per point)')
