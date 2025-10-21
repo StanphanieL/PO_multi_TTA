@@ -11,6 +11,73 @@ import MinkowskiEngine as ME
 import datasets.Real3D.transform as aug_transform
 import re
 
+
+
+def simulate_partial_view(points, normals=None, view_loss_ratio=0.5):
+        """
+        Simulates a partial view by removing points based on a random viewing direction.
+
+        Args:
+            points (np.ndarray): Input point cloud coordinates (N, 3).
+            normals (np.ndarray, optional): Input point normals (N, 3). If provided,
+                                            visibility check is based on normals.
+                                            Otherwise, based on random plane cut.
+            view_loss_ratio (float): Approximate ratio of points to remove.
+
+        Returns:
+            np.ndarray: Point cloud representing a partial view.
+            np.ndarray: Corresponding normals if normals were input.
+        """
+        num_points = points.shape[0]
+        if num_points == 0:
+            return points, normals
+
+        if normals is not None:
+            # --- Method 1: Normal-based visibility ---
+            # Randomly select a viewing direction (vector on unit sphere)
+            view_dir = np.random.randn(3)
+            view_dir /= np.linalg.norm(view_dir)
+
+            # Calculate dot product between normals and view direction
+            # Points whose normal faces away from the view direction are potentially occluded
+            visibility_scores = np.dot(normals, view_dir)
+
+            # Keep points whose normals are somewhat aligned with the view direction
+            # We use a percentile based on the desired loss ratio
+            threshold = np.percentile(visibility_scores, view_loss_ratio * 100)
+            keep_indices = visibility_scores >= threshold
+
+            # Ensure we don't remove all points
+            if np.sum(keep_indices) == 0:
+                keep_indices = np.ones(num_points, dtype=bool) # Keep all if threshold removes everything
+
+            points_partial = points[keep_indices]
+            normals_partial = normals[keep_indices] if normals is not None else None
+            return points_partial, normals_partial
+
+        else:
+            # --- Method 2: Random Plane Cut (Simpler, if normals aren't reliably available) ---
+            # Choose a random normal vector for the cutting plane
+            plane_normal = np.random.randn(3)
+            plane_normal /= np.linalg.norm(plane_normal)
+
+            # Project points onto the plane normal
+            projections = np.dot(points, plane_normal)
+
+            # Determine a cutting threshold based on the desired loss ratio
+            cut_threshold = np.percentile(projections, view_loss_ratio * 100)
+
+            # Keep points on one side of the plane
+            keep_indices = projections >= cut_threshold
+
+            # Ensure we don't remove all points
+            if np.sum(keep_indices) == 0:
+                keep_indices = np.ones(num_points, dtype=bool)
+
+            points_partial = points[keep_indices]
+            # Normals are not modified or returned in this method
+            return points_partial, None
+
 class Dataset:
     def __init__(self, cfg):
         self.batch_size = cfg.batch_size
@@ -126,6 +193,49 @@ class Dataset:
 
         return new_points
 
+
+    # def contrastiveMerge(self, id):
+    #     file_name = []
+    #     labels = []
+    #     xyz_voxel_1 = []
+    #     feat_voxel_1 = []
+    #     xyz_voxel_2 = []
+    #     feat_voxel_2 = []
+    #     for i, idx in enumerate(id):
+    #         fn_path, cat_id = self.train_file_list[idx]
+    #         file_name.append(fn_path)
+    #         labels.append(cat_id)
+    #         obj = o3d.io.read_triangle_mesh(fn_path)
+    #         obj.compute_vertex_normals()
+    #         coord = np.asarray(obj.vertices)
+
+    #         Point_dict_1 = {'coord': coord.copy()}
+    #         Point_dict_1 = self.contrast_aug(Point_dict_1)
+    #         xyz1 = Point_dict_1['coord'].astype(np.float32)
+    #         Point_dict_2 = {'coord': coord.copy()}
+    #         Point_dict_2 = self.contrast_aug(Point_dict_2)
+    #         xyz2 = Point_dict_2['coord'].astype(np.float32)
+
+    #         q1, f1, _, _ = ME.utils.sparse_quantize(xyz1, xyz1, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+    #         q2, f2, _, _ = ME.utils.sparse_quantize(xyz2, xyz2, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+    #         xyz_voxel_1.append(q1)
+    #         feat_voxel_1.append(f1)
+    #         xyz_voxel_2.append(q2)
+    #         feat_voxel_2.append(f2)
+
+    #     xyz_voxel_1_batch, feat_voxel_1_batch = ME.utils.sparse_collate(xyz_voxel_1, feat_voxel_1)
+    #     xyz_voxel_2_batch, feat_voxel_2_batch = ME.utils.sparse_collate(xyz_voxel_2, feat_voxel_2)
+    #     labels = torch.from_numpy(np.array(labels)).long()
+    #     return {
+    #         'xyz_voxel_view1': xyz_voxel_1_batch,
+    #         'feat_voxel_view1': feat_voxel_1_batch,
+    #         'xyz_voxel_view2': xyz_voxel_2_batch,
+    #         'feat_voxel_view2': feat_voxel_2_batch,
+    #         'labels': labels,
+    #         'fn': file_name,
+    #     }
+
+    # In datasets/Real3D/dataset_preprocess.py
     def contrastiveMerge(self, id):
         file_name = []
         labels = []
@@ -133,28 +243,110 @@ class Dataset:
         feat_voxel_1 = []
         xyz_voxel_2 = []
         feat_voxel_2 = []
+
+        # --- Probability to apply partial view simulation ---
+        partial_view_prob = 0.5 # Example: Apply partial view 50% of the time
+        # --- Ratio of points to remove when applying partial view ---
+        partial_view_ratio = 0.4 # Example: Remove approx 40% of points
+
         for i, idx in enumerate(id):
             fn_path, cat_id = self.train_file_list[idx]
             file_name.append(fn_path)
             labels.append(cat_id)
-            obj = o3d.io.read_triangle_mesh(fn_path)
-            obj.compute_vertex_normals()
-            coord = np.asarray(obj.vertices)
 
+            # Load mesh and get vertices and normals
+            try: # Use try-except for robustness, especially with normals
+                obj = o3d.io.read_triangle_mesh(fn_path)
+                obj.compute_vertex_normals()
+                coord = np.asarray(obj.vertices)
+                # --- Get normals here ---
+                vertex_normals = np.asarray(obj.vertex_normals)
+                has_normals = True
+            except Exception as e:
+                print(f"Warning: Could not load mesh or compute normals for {fn_path}. Using point cloud loading. Error: {e}")
+                # Fallback to loading as point cloud if mesh fails or normals are bad
+                pcd = o3d.io.read_point_cloud(fn_path) # Assuming templates might also exist as PCD
+                coord = np.asarray(pcd.points)
+                vertex_normals = None # No reliable normals
+                has_normals = False
+
+
+            # --- Apply standard contrastive augmentations ---
             Point_dict_1 = {'coord': coord.copy()}
             Point_dict_1 = self.contrast_aug(Point_dict_1)
             xyz1 = Point_dict_1['coord'].astype(np.float32)
+            # Apply same augmentation stream but potentially different params to get view 2
             Point_dict_2 = {'coord': coord.copy()}
             Point_dict_2 = self.contrast_aug(Point_dict_2)
             xyz2 = Point_dict_2['coord'].astype(np.float32)
 
-            q1, f1, _, _ = ME.utils.sparse_quantize(xyz1, xyz1, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
-            q2, f2, _, _ = ME.utils.sparse_quantize(xyz2, xyz2, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
-            xyz_voxel_1.append(q1)
-            feat_voxel_1.append(f1)
-            xyz_voxel_2.append(q2)
-            feat_voxel_2.append(f2)
+            # --- Apply Partial View Simulation ---
+            # We need normals corresponding to the augmented views if using normal-based method
+            # For simplicity, let's use the random plane cut method here (Method 2)
+            # which doesn't strictly need accurate normals after augmentation.
+            # Or, apply partial view BEFORE standard augmentation (might be simpler)
 
+            # --- Option A: Apply partial view AFTER standard augmentation (using Plane Cut) ---
+            if random.random() < partial_view_prob:
+                xyz1, _ = simulate_partial_view(xyz1, normals=None, view_loss_ratio=partial_view_ratio)
+            if random.random() < partial_view_prob:
+                xyz2, _ = simulate_partial_view(xyz2, normals=None, view_loss_ratio=partial_view_ratio)
+
+
+            # --- Option B: Apply partial view BEFORE standard augmentation (More robust maybe) ---
+            # coord_view1 = coord.copy()
+            # normals_view1 = vertex_normals.copy() if has_normals else None
+            # if random.random() < partial_view_prob:
+            #      coord_view1, normals_view1 = simulate_partial_view(coord_view1, normals_view1, view_loss_ratio=partial_view_ratio)
+
+            # coord_view2 = coord.copy()
+            # normals_view2 = vertex_normals.copy() if has_normals else None
+            # if random.random() < partial_view_prob:
+            #      coord_view2, normals_view2 = simulate_partial_view(coord_view2, normals_view2, view_loss_ratio=partial_view_ratio)
+
+            # # Apply standard contrastive augmentations AFTER partial view simulation
+            # Point_dict_1 = {'coord': coord_view1} # Pass normals if needed by contrast_aug
+            # Point_dict_1 = self.contrast_aug(Point_dict_1)
+            # xyz1 = Point_dict_1['coord'].astype(np.float32)
+
+            # Point_dict_2 = {'coord': coord_view2}
+            # Point_dict_2 = self.contrast_aug(Point_dict_2)
+            # xyz2 = Point_dict_2['coord'].astype(np.float32)
+
+
+            # --- Quantization and Batching (No changes needed here) ---
+            # Ensure xyz1 and xyz2 are not empty after simulation
+            if xyz1.shape[0] > 0:
+                q1, f1, _, _ = ME.utils.sparse_quantize(xyz1, xyz1, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+                xyz_voxel_1.append(q1)
+                feat_voxel_1.append(f1)
+            else: # Handle empty point cloud case if necessary
+                # Maybe append empty tensors or skip? Needs careful handling downstream.
+                # For now, let's just make sure it doesn't crash by skipping if empty
+                print(f"Warning: View 1 became empty for {fn_path} after partial view simulation.")
+                # Need a strategy here - perhaps skip this sample? Or use original?
+                # Simplest: use original if simulation makes it empty
+                if xyz1.shape[0] == 0:
+                    xyz1_orig = self.contrast_aug({'coord': coord.copy()})['coord'].astype(np.float32)
+                    q1, f1, _, _ = ME.utils.sparse_quantize(xyz1_orig, xyz1_orig, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+                    xyz_voxel_1.append(q1)
+                    feat_voxel_1.append(f1)
+
+
+            if xyz2.shape[0] > 0:
+                q2, f2, _, _ = ME.utils.sparse_quantize(xyz2, xyz2, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+                xyz_voxel_2.append(q2)
+                feat_voxel_2.append(f2)
+            else:
+                print(f"Warning: View 2 became empty for {fn_path} after partial view simulation.")
+                if xyz2.shape[0] == 0:
+                    xyz2_orig = self.contrast_aug({'coord': coord.copy()})['coord'].astype(np.float32)
+                    q2, f2, _, _ = ME.utils.sparse_quantize(xyz2_orig, xyz2_orig, quantization_size=self.voxel_size, return_index=True, return_inverse=True)
+                    xyz_voxel_2.append(q2)
+                    feat_voxel_2.append(f2)
+
+
+        # --- Collate batches (No changes needed) ---
         xyz_voxel_1_batch, feat_voxel_1_batch = ME.utils.sparse_collate(xyz_voxel_1, feat_voxel_1)
         xyz_voxel_2_batch, feat_voxel_2_batch = ME.utils.sparse_collate(xyz_voxel_2, feat_voxel_2)
         labels = torch.from_numpy(np.array(labels)).long()
