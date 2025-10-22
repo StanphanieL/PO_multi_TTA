@@ -8,7 +8,7 @@ def get_parser():
     parser.add_argument('--task', type=str, default='train', help='task: train, eval or contrastive')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
     parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
-    parser.add_argument('--num_works', type=int, default=0, help='num_works for dataset')
+    parser.add_argument('--num_works', type=int, default=8, help='num_works for dataset')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
     parser.add_argument('--logpath', type=str, default='./log/ashtray0/', help='path to save logs')

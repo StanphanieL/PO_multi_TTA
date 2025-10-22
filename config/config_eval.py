@@ -38,6 +38,7 @@ def get_parser():
     parser.add_argument('--out_channels', type=int, default=32, help='backbone feat channels')
     parser.add_argument('--class_embed_dim', type=int, default=32, help='class embedding dim used by conditional offset head at eval; must match training')
     parser.add_argument('--conditional_mode', type=str, default='concat', help='conditional mode for offset head at eval: concat or film')
+    parser.add_argument('--conditioning_source', type=str, default='auto', help='conditioning source at eval: auto (cluster then true), true (always true category), cluster (predicted cluster), none (no conditioning)')
 
     # contrastive eval params
     parser.add_argument('--contrastive_eval', action='store_true', help='run cluster evaluation with contrastive model')
@@ -60,6 +61,10 @@ def get_parser():
     parser.add_argument('--aupro_fpr_max', type=float, default=0.3, help='FPR upper bound for AUPRO (e.g., 0.3 for 0~30%)')
     parser.add_argument('--aupro_points', type=int, default=31, help='number of FPR points in [0, aupro_fpr_max]')
     parser.add_argument('--region_knn', type=int, default=16, help='kNN for region connectivity among positive points')
+
+    # Visualization saving
+    parser.add_argument('--save_npz', action='store_true', help='save per-sample xyz and scores (.npz) for visualization')
+    parser.add_argument('--npz_dir', type=str, default='./results/vis/', help='directory to save .npz files')
 
     # Test-time augmentation (multi-view) options
     parser.add_argument('--tta_views', type=int, default=2, help='number of TTA geometric views (0 disables)')

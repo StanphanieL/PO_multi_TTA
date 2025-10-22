@@ -194,15 +194,21 @@ def eval(cfgs):
             assigner = None
             proto = None
 
+    # conditioning source option
+    cond_src = getattr(cfg, 'conditioning_source', 'auto').lower()
+    if cond_src not in ['auto', 'true', 'cluster', 'none']:
+        cond_src = 'auto'
+
     # report cluster assigner / conditioning status
     cluster_assigner_ready = (assigner is not None and proto is not None)
+    print(f"[Conditioning] source={cond_src}")
     if getattr(cfg, 'cluster_norm', False):
         if cluster_assigner_ready:
-            print('[Cluster] cluster_norm=True -> Predicted clusters will be used for conditioning and per-cluster metrics.')
+            print('[Cluster] cluster_norm=True -> Predicted clusters available for per-cluster metrics.')
         else:
-            print('[Cluster] cluster_norm=True but assigner unavailable -> Will FALLBACK to true categories for conditioning if known.')
+            print('[Cluster] cluster_norm=True but assigner unavailable -> Per-cluster metrics disabled.')
     else:
-        print('[Cluster] cluster_norm=False -> Predicted clusters disabled; Will use true categories for conditioning if known.')
+        print('[Cluster] cluster_norm=False -> Predicted clusters disabled; using category metrics only.')
 
     # decide normal tag for test set
     if cfg.dataset == 'AnomalyShapeNet':
@@ -258,7 +264,7 @@ def eval(cfgs):
 
     # counters for conditioning decisions
     used_pred_cluster = 0
-    used_true_fallback = 0
+    used_true_cond = 0
     used_unconditional = 0
 
     for i, batch in enumerate(dataset.test_data_loader):
@@ -312,20 +318,38 @@ def eval(cfgs):
             cid = -1
         pred_clusters.append(cid)
 
-        # conditioning category: predicted cluster if available else true category
-        cond_cid = cid if cid >= 0 else true_id
+        # conditioning category: follow user option
+        if cond_src == 'true':
+            cond_cid = true_id
+        elif cond_src == 'cluster':
+            cond_cid = cid if cid >= 0 else -1
+        elif cond_src == 'none':
+            cond_cid = -1
+        else:  # auto: cluster then true
+            cond_cid = cid if cid >= 0 else true_id
         cond_ids = None if cond_cid < 0 else torch.tensor([cond_cid], dtype=torch.long).cuda()
 
-        # logging for fallback/usage
-        if cid >= 0:
-            used_pred_cluster += 1
-        else:
-            if true_id >= 0:
-                used_true_fallback += 1
-                print(f"[Cluster][Fallback->TRUE] sample='{sample_name}' true_cat_id={true_id} (predicted cluster unavailable)")
+        # logging for usage
+        if cond_src == 'true':
+            used_true_cond += 1
+        elif cond_src == 'cluster':
+            if cond_cid >= 0:
+                used_pred_cluster += 1
             else:
                 used_unconditional += 1
-                print(f"[Cluster][Fallback->UNCOND] sample='{sample_name}' (no predicted cluster and true category unknown)")
+                print(f"[Cond][UNCOND] sample='{sample_name}' (cluster chosen but unavailable)")
+        elif cond_src == 'none':
+            used_unconditional += 1
+        else:  # auto
+            if cid >= 0:
+                used_pred_cluster += 1
+            else:
+                if true_id >= 0:
+                    used_true_cond += 1
+                    print(f"[Cond][Auto->TRUE] sample='{sample_name}' true_cat_id={true_id} (predicted cluster unavailable)")
+                else:
+                    used_unconditional += 1
+                    print(f"[Cond][Auto->UNCOND] sample='{sample_name}' (no predicted cluster and true category unknown)")
 
         t0 = time.time()
         score, pred_mask_tensor = eval_fn(batch, model, category_ids=cond_ids)
@@ -419,6 +443,20 @@ def eval(cfgs):
         label_score_post += list(zip(y_list, [fused_obj_score]))
         label_score += list(zip(y_list, [fused_obj_score]))
 
+        # optional: save .npz per sample for visualization
+        if getattr(cfg, 'save_npz', False):
+            try:
+                os.makedirs(getattr(cfg, 'npz_dir', './results/vis'), exist_ok=True)
+                out_npz = os.path.join(getattr(cfg, 'npz_dir', './results/vis'), f'{sample_name}.npz')
+                np.savez(out_npz,
+                         xyz=xyz_np.astype(np.float32),
+                         score=pred_mask_post.astype(np.float32),
+                         score_pre=pred_mask_pre.astype(np.float32),
+                         gt=gt_this.astype(np.float32) if 'gt_this' in locals() else None,
+                         label=np.array(y_list, dtype=np.int64))
+            except Exception as e:
+                print(f'[NPZ] save failed: {e}')
+
         # per-sample macro AP
         if getattr(cfg, 'point_macro_ap', False):
             pts = pred_mask_post.copy()
@@ -428,7 +466,7 @@ def eval(cfgs):
 
     # summary of conditioning decisions
     total_samples = len(fns)
-    print(f"[Cluster-Conditioning][Summary] used_predicted={used_pred_cluster}/{total_samples}, fallback_true={used_true_fallback}, fallback_unconditional={used_unconditional}")
+    print(f"[Conditioning][Summary] used_cluster={used_pred_cluster}/{total_samples}, used_true={used_true_cond}, used_unconditional={used_unconditional}")
 
     # Cluster-Class confusion / consistency summary
     if 'cluster_assigner_ready' in locals() and cluster_assigner_ready:

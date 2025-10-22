@@ -163,7 +163,7 @@ def train_epoch_contrastive(train_loader, model, supcon_criterion, proto_module,
         am_loss.update(loss.item(), labels.shape[0])
         am_acc.update(acc, labels.shape[0])
 
-        # collect for visualization (cap to cfg.emb_save_samples) 收集部分样本的嵌入向量和标签，用于可视化
+        # 收集部分样本的嵌入向量和标签，用于可视化
         try:
             if cfg.emb_save_samples > 0 and (sum([arr.shape[0] for arr in viz_z_list]) < cfg.emb_save_samples):
                 take = min(labels.shape[0], cfg.emb_save_samples - sum([arr.shape[0] for arr in viz_z_list]))
