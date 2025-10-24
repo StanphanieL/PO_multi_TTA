@@ -8,7 +8,7 @@ def get_parser():
     parser.add_argument('--task', type=str, default='train', help='task: train, eval or contrastive')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
     parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
-    parser.add_argument('--num_works', type=int, default=8, help='num_works for dataset')
+    parser.add_argument('--num_works', type=int, default=4, help='num_works for dataset (DataLoader workers)')
     parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
     parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
     parser.add_argument('--logpath', type=str, default='./log/ashtray0/', help='path to save logs')
@@ -22,6 +22,14 @@ def get_parser():
     parser.add_argument('--batch_size', type=int, default=32, help='batch_size for single GPU')
     parser.add_argument('--data_repeat', type=int, default=10, help='repeat the date for each epoch')
     parser.add_argument('--mask_num', type=int, default=64)
+
+    # DataLoader performance options
+    parser.add_argument('--pin_memory', action='store_true', help='enable DataLoader pin_memory')
+    parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch_factor (workers>0)')
+
+    # I/O cache options
+    parser.add_argument('--cache_io', action='store_true', help='cache heavy I/O (meshes, pcd/gt coords) to .npz for faster loading')
+    parser.add_argument('--cache_dir', type=str, default='./cache', help='directory to store cached arrays')
 
     # #Adjust learning rate
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')

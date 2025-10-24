@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 import MinkowskiEngine as ME
 import datasets.Real3D.transform as aug_transform
 import re
+import os
+import hashlib
 
 
 
@@ -85,6 +87,14 @@ class Dataset:
         self.data_repeat = cfg.data_repeat
         self.voxel_size = cfg.voxel_size
         self.mask_num = cfg.mask_num
+        # perf options
+        self.pin_memory = getattr(cfg, 'pin_memory', False)
+        self.prefetch_factor = getattr(cfg, 'prefetch_factor', 2)
+        # cache options
+        self.cache_io = getattr(cfg, 'cache_io', False)
+        self.cache_dir = os.path.join(getattr(cfg, 'cache_dir', './cache'), 'Real3D')
+        if self.cache_io:
+            os.makedirs(self.cache_dir, exist_ok=True)
 
         # categories handling
         default_list = ['airplane', 'candybar', 'car', 'chicken', 'diamond', 'duck', 'fish', 'gemstone',
@@ -154,24 +164,30 @@ class Dataset:
         self.train_data_loader = DataLoader(train_set, batch_size=self.batch_size, collate_fn=self.trainMerge,
                                             num_workers=self.dataset_workers,
                                             shuffle=True, sampler=None,
-                                            drop_last=True, pin_memory=False,
-                                            worker_init_fn=self._worker_init_fn_)
+                                            drop_last=True, pin_memory=self.pin_memory,
+                                            worker_init_fn=self._worker_init_fn_,
+                                            persistent_workers=(self.dataset_workers>0),
+                                            prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
     def contrastiveLoader(self):
         train_set = list(range(len(self.train_file_list)))
         self.train_data_loader = DataLoader(train_set, batch_size=self.batch_size, collate_fn=self.contrastiveMerge,
                                             num_workers=self.dataset_workers,
                                             shuffle=True, sampler=None,
-                                            drop_last=True, pin_memory=False,
-                                            worker_init_fn=self._worker_init_fn_)
+                                            drop_last=True, pin_memory=self.pin_memory,
+                                            worker_init_fn=self._worker_init_fn_,
+                                            persistent_workers=(self.dataset_workers>0),
+                                            prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
     def testLoader(self):
         test_set = list(range(len(self.test_file_list)))
         self.test_data_loader = DataLoader(test_set, batch_size=1, collate_fn=self.testMerge,
                                            num_workers=self.dataset_workers,
                                            shuffle=False, sampler=None,
-                                           drop_last=False, pin_memory=False,
-                                           worker_init_fn=self._worker_init_fn_)
+                                           drop_last=False, pin_memory=self.pin_memory,
+                                           worker_init_fn=self._worker_init_fn_,
+                                           persistent_workers=(self.dataset_workers>0),
+                                           prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
 
     def _worker_init_fn_(self, worker_id):
@@ -245,23 +261,43 @@ class Dataset:
         feat_voxel_2 = []
 
         # --- Probability to apply partial view simulation ---
-        partial_view_prob = 0.5 # Example: Apply partial view 50% of the time
+        partial_view_prob = 1.0 # Example: Apply partial view 50% of the time
         # --- Ratio of points to remove when applying partial view ---
-        partial_view_ratio = 0.4 # Example: Remove approx 40% of points
+        partial_view_ratio = 0.35 # Example: Remove approx 40% of points
 
         for i, idx in enumerate(id):
             fn_path, cat_id = self.train_file_list[idx]
             file_name.append(fn_path)
             labels.append(cat_id)
 
-            # Load mesh and get vertices and normals
+            # Load mesh and get vertices and normals (with optional cache)
             try: # Use try-except for robustness, especially with normals
-                obj = o3d.io.read_triangle_mesh(fn_path)
-                obj.compute_vertex_normals()
-                coord = np.asarray(obj.vertices)
-                # --- Get normals here ---
-                vertex_normals = np.asarray(obj.vertex_normals)
-                has_normals = True
+                cache_key = None
+                if self.cache_io:
+                    rel = fn_path.replace('/', '_').replace('\\', '_')
+                    h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                    cache_key = os.path.join(self.cache_dir, f'mesh_{h}.npz')
+                if self.cache_io and os.path.isfile(cache_key):
+                    arr = np.load(cache_key)
+                    coord = arr['coord']
+                    vertex_normals = arr['normal'] if 'normal' in arr.files else None
+                    if vertex_normals is None:
+                        # fallback compute normals once
+                        obj = o3d.io.read_triangle_mesh(fn_path)
+                        obj.compute_vertex_normals()
+                        vertex_normals = np.asarray(obj.vertex_normals)
+                else:
+                    obj = o3d.io.read_triangle_mesh(fn_path)
+                    obj.compute_vertex_normals()
+                    coord = np.asarray(obj.vertices)
+                    # --- Get normals here ---
+                    vertex_normals = np.asarray(obj.vertex_normals)
+                    if self.cache_io:
+                        try:
+                            np.savez(cache_key, coord=coord.astype(np.float32), normal=vertex_normals.astype(np.float32))
+                        except Exception:
+                            pass
+                has_normals = True if vertex_normals is not None else False
             except Exception as e:
                 print(f"Warning: Could not load mesh or compute normals for {fn_path}. Using point cloud loading. Error: {e}")
                 # Fallback to loading as point cloud if mesh fails or normals are bad
@@ -376,10 +412,30 @@ class Dataset:
             file_name.append(fn_path)
             category_ids.append(cat_id)
 
-            obj = o3d.io.read_triangle_mesh(fn_path)
-            obj.compute_vertex_normals()
-            coord = np.asarray(obj.vertices)
-            vertex_normals = np.asarray(obj.vertex_normals)
+            # load mesh with optional cache
+            cache_key = None
+            if self.cache_io:
+                rel = fn_path.replace('/', '_').replace('\\', '_')
+                h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                cache_key = os.path.join(self.cache_dir, f'mesh_{h}.npz')
+            if self.cache_io and os.path.isfile(cache_key):
+                arr = np.load(cache_key)
+                coord = arr['coord']
+                vertex_normals = arr['normal'] if 'normal' in arr.files else None
+                if vertex_normals is None:
+                    obj = o3d.io.read_triangle_mesh(fn_path)
+                    obj.compute_vertex_normals()
+                    vertex_normals = np.asarray(obj.vertex_normals)
+            else:
+                obj = o3d.io.read_triangle_mesh(fn_path)
+                obj.compute_vertex_normals()
+                coord = np.asarray(obj.vertices)
+                vertex_normals = np.asarray(obj.vertex_normals)
+                if self.cache_io:
+                    try:
+                        np.savez(cache_key, coord=coord.astype(np.float32), normal=vertex_normals.astype(np.float32))
+                    except Exception:
+                        pass
             mask = np.ones(coord.shape[0]) * -1
 
             Point_dict = {'coord': coord, 'normal': vertex_normals, 'mask': mask}
@@ -454,12 +510,41 @@ class Dataset:
             c = fn_path.split('/')[-3]
 
             if 'good' in fn_path:
-                pcd = o3d.io.read_point_cloud(fn_path)
-                coord = np.asarray(pcd.points)
+                cache_key = None
+                if self.cache_io:
+                    rel = fn_path.replace('/', '_').replace('\\', '_')
+                    h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                    cache_key = os.path.join(self.cache_dir, f'pcd_{h}.npz')
+                if self.cache_io and os.path.isfile(cache_key):
+                    arr = np.load(cache_key)
+                    coord = arr['xyz']
+                else:
+                    pcd = o3d.io.read_point_cloud(fn_path)
+                    coord = np.asarray(pcd.points)
+                    if self.cache_io:
+                        try:
+                            np.savez(cache_key, xyz=coord.astype(np.float32))
+                        except Exception:
+                            pass
             else:
                 sample_name = fn_path.split('/')[-1].split('.')[0]
                 gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{c}/gt/'
-                coord = np.loadtxt(gt_mask_path + sample_name + '.txt')[:, 0:3]
+                gt_file = gt_mask_path + sample_name + '.txt'
+                cache_key = None
+                if self.cache_io:
+                    rel = gt_file.replace('/', '_').replace('\\', '_')
+                    h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                    cache_key = os.path.join(self.cache_dir, f'gt_{h}.npz')
+                if self.cache_io and os.path.isfile(cache_key):
+                    arr = np.load(cache_key)
+                    coord = arr['xyz']
+                else:
+                    coord = np.loadtxt(gt_file)[:, 0:3]
+                    if self.cache_io:
+                        try:
+                            np.savez(cache_key, xyz=coord.astype(np.float32))
+                        except Exception:
+                            pass
 
             # ####Data aug
             Point_dict = {'coord': coord}

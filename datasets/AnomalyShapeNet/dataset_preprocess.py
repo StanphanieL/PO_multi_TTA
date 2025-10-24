@@ -11,6 +11,7 @@ import MinkowskiEngine as ME
 import datasets.AnomalyShapeNet.transform as aug_transform
 import os
 import re
+import hashlib
 
 class Dataset:
     def __init__(self, cfg):
@@ -19,6 +20,14 @@ class Dataset:
         self.data_repeat = cfg.data_repeat
         self.voxel_size = cfg.voxel_size
         self.mask_num = cfg.mask_num
+        # perf options
+        self.pin_memory = getattr(cfg, 'pin_memory', False)
+        self.prefetch_factor = getattr(cfg, 'prefetch_factor', 2)
+        # cache options
+        self.cache_io = getattr(cfg, 'cache_io', False)
+        self.cache_dir = os.path.join(getattr(cfg, 'cache_dir', './cache'), 'AnomalyShapeNet')
+        if self.cache_io:
+            os.makedirs(self.cache_dir, exist_ok=True)
 
         # categories handling
         self.single_category = cfg.category
@@ -93,24 +102,30 @@ class Dataset:
         self.train_data_loader = DataLoader(train_set, batch_size=self.batch_size, collate_fn=self.trainMerge,
                                             num_workers=self.dataset_workers,
                                             shuffle=True, sampler=None,
-                                            drop_last=True, pin_memory=False,
-                                            worker_init_fn=self._worker_init_fn_)
+                                            drop_last=True, pin_memory=self.pin_memory,
+                                            worker_init_fn=self._worker_init_fn_,
+                                            persistent_workers=(self.dataset_workers>0),
+                                            prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
     def contrastiveLoader(self):
         train_set = list(range(len(self.train_file_list)))
         self.train_data_loader = DataLoader(train_set, batch_size=self.batch_size, collate_fn=self.contrastiveMerge,
                                             num_workers=self.dataset_workers,
                                             shuffle=True, sampler=None,
-                                            drop_last=True, pin_memory=False,
-                                            worker_init_fn=self._worker_init_fn_)
+                                            drop_last=True, pin_memory=self.pin_memory,
+                                            worker_init_fn=self._worker_init_fn_,
+                                            persistent_workers=(self.dataset_workers>0),
+                                            prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
     def testLoader(self):
         test_set = list(range(len(self.test_file_list)))
         self.test_data_loader = DataLoader(test_set, batch_size=1, collate_fn=self.testMerge,
                                            num_workers=self.dataset_workers,
                                            shuffle=False, sampler=None,
-                                           drop_last=False, pin_memory=False,
-                                           worker_init_fn=self._worker_init_fn_)
+                                           drop_last=False, pin_memory=self.pin_memory,
+                                           worker_init_fn=self._worker_init_fn_,
+                                           persistent_workers=(self.dataset_workers>0),
+                                           prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
 
     def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08):
         distances_to_center = np.linalg.norm(points - center, axis=1)
@@ -137,9 +152,24 @@ class Dataset:
             fn_path, cat_id = self.train_file_list[idx]
             file_name.append(fn_path)
             labels.append(cat_id)
-            obj = o3d.io.read_triangle_mesh(fn_path)
-            obj.compute_vertex_normals()
-            coord = np.asarray(obj.vertices)
+            # load mesh with optional cache
+            cache_key = None
+            if self.cache_io:
+                rel = fn_path.replace('/', '_').replace('\\', '_')
+                h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                cache_key = os.path.join(self.cache_dir, f'mesh_{h}.npz')
+            if self.cache_io and os.path.isfile(cache_key):
+                arr = np.load(cache_key)
+                coord = arr['coord']
+            else:
+                obj = o3d.io.read_triangle_mesh(fn_path)
+                obj.compute_vertex_normals()
+                coord = np.asarray(obj.vertices)
+                if self.cache_io:
+                    try:
+                        np.savez(cache_key, coord=coord.astype(np.float32), normal=np.asarray(obj.vertex_normals).astype(np.float32))
+                    except Exception:
+                        pass
 
             # two views with independent augmentations
             Point_dict_1 = {'coord': coord.copy()}
@@ -185,11 +215,26 @@ class Dataset:
             file_name.append(fn_path)
             category_ids.append(cat_id)
 
-            # #####Load data
-            obj = o3d.io.read_triangle_mesh(fn_path)
-            obj.compute_vertex_normals()
-            coord = np.asarray(obj.vertices)
-            vertex_normals = np.asarray(obj.vertex_normals)
+            # #####Load data (with optional cache)
+            cache_key = None
+            if self.cache_io:
+                rel = fn_path.replace('/', '_').replace('\\', '_')
+                h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                cache_key = os.path.join(self.cache_dir, f'mesh_{h}.npz')
+            if self.cache_io and os.path.isfile(cache_key):
+                arr = np.load(cache_key)
+                coord = arr['coord']
+                vertex_normals = arr['normal']
+            else:
+                obj = o3d.io.read_triangle_mesh(fn_path)
+                obj.compute_vertex_normals()
+                coord = np.asarray(obj.vertices)
+                vertex_normals = np.asarray(obj.vertex_normals)
+                if self.cache_io:
+                    try:
+                        np.savez(cache_key, coord=coord.astype(np.float32), normal=vertex_normals.astype(np.float32))
+                    except Exception:
+                        pass
             mask = np.ones(coord.shape[0]) * -1
 
             # ####Data aug
@@ -268,12 +313,41 @@ class Dataset:
             c = fn_path.split('/')[-3]
 
             if 'positive' in fn_path:
-                pcd = o3d.io.read_point_cloud(fn_path)
-                coord = np.asarray(pcd.points)
+                cache_key = None
+                if self.cache_io:
+                    rel = fn_path.replace('/', '_').replace('\\', '_')
+                    h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                    cache_key = os.path.join(self.cache_dir, f'pcd_{h}.npz')
+                if self.cache_io and os.path.isfile(cache_key):
+                    arr = np.load(cache_key)
+                    coord = arr['xyz']
+                else:
+                    pcd = o3d.io.read_point_cloud(fn_path)
+                    coord = np.asarray(pcd.points)
+                    if self.cache_io:
+                        try:
+                            np.savez(cache_key, xyz=coord.astype(np.float32))
+                        except Exception:
+                            pass
             else:
                 sample_name = fn_path.split('/')[-1].split('.')[0]
                 gt_mask_path = f'datasets/AnomalyShapeNet/dataset/pcd/{c}/GT/'
-                coord = np.loadtxt(gt_mask_path + sample_name + '.txt', delimiter=',')[:, 0:3]
+                gt_file = gt_mask_path + sample_name + '.txt'
+                cache_key = None
+                if self.cache_io:
+                    rel = gt_file.replace('/', '_').replace('\\', '_')
+                    h = hashlib.md5(rel.encode('utf-8')).hexdigest()[:16]
+                    cache_key = os.path.join(self.cache_dir, f'gt_{h}.npz')
+                if self.cache_io and os.path.isfile(cache_key):
+                    arr = np.load(cache_key)
+                    coord = arr['xyz']
+                else:
+                    coord = np.loadtxt(gt_file, delimiter=',')[:, 0:3]
+                    if self.cache_io:
+                        try:
+                            np.savez(cache_key, xyz=coord.astype(np.float32))
+                        except Exception:
+                            pass
 
             # ####Data aug
             Point_dict = {'coord': coord}

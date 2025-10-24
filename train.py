@@ -134,7 +134,7 @@ def train_epoch_contrastive(train_loader, model, supcon_criterion, proto_module,
             proto = F.normalize(proto_module.proto, dim=1)
             proto_loss = proto_criterion(torch.cat([z1, z2], dim=0), torch.cat([labels, labels], dim=0), proto)
             loss = loss + cfg.proto_loss_weight * proto_loss
-
+ 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
