@@ -221,9 +221,30 @@ def eval(cfgs):
     dataset.testLoader()
     print(f'Test samples: {len(dataset.test_file_list)}')
 
-    # timing accumulators for pre/post (model forward only)
-    pre_infer_time_sum = 0.0
-    post_infer_time_sum = 0.0
+    # BN-TTA: refresh BN running stats using a few test samples
+    if getattr(cfg, 'bn_tta', False) and int(getattr(cfg, 'bn_tta_samples', 0)) > 0:
+        try:
+            n_bntta = int(min(getattr(cfg, 'bn_tta_samples', 16), len(dataset.test_file_list)))
+            print(f'[BN-TTA] refreshing BN stats with {n_bntta} samples ...')
+            t_start_bn = time.time()
+            model.train()
+            with torch.no_grad():
+                it = 0
+                for batch in dataset.test_data_loader:
+                    _ = model.test_inference(batch['feat_voxel'], batch['xyz_voxel'], batch['v2p_index'], batch_count=batch.get('batch_count', None), category_ids=None)
+                    it += 1
+                    if it >= n_bntta:
+                        break
+            model.eval()
+            bn_tta_time_total = time.time() - t_start_bn
+        except Exception as e:
+            print(f'[BN-TTA] failed: {e}')
+
+    # timing accumulators
+    pre_infer_time_sum = 0.0           # baseline forward per sample
+    post_infer_time_sum = 0.0          # extra TTA forward time (geom views)
+    ttt_time_sum = 0.0                 # TTT adaptation time
+    bn_tta_time_total = 0.0            # BN refresh time (global)
     sample_count = 0
 
     def safe_auc_roc(y_true, y_score):
@@ -314,6 +335,18 @@ def eval(cfgs):
                 z = F.normalize(z, dim=1)
                 logits = torch.matmul(z, proto.T)
                 cid = torch.argmax(logits, dim=1).item()
+                # optional Prototype-EMA update with confidence gating
+                if getattr(cfg, 'proto_ema', False):
+                    try:
+                        prob = torch.softmax(logits, dim=1)[0]
+                        conf, cmax = float(prob.max().item()), int(prob.argmax().item())
+                        if conf >= float(getattr(cfg, 'proto_ema_tau', 0.8)):
+                            m = float(getattr(cfg, 'proto_ema_m', 0.99))
+                            old = proto[cmax:cmax+1]
+                            new = F.normalize(m * old + (1.0 - m) * z, dim=1)
+                            proto[cmax:cmax+1] = new
+                    except Exception as _:
+                        pass
         else:
             cid = -1
         pred_clusters.append(cid)
@@ -351,9 +384,10 @@ def eval(cfgs):
                     used_unconditional += 1
                     print(f"[Cond][Auto->UNCOND] sample='{sample_name}' (no predicted cluster and true category unknown)")
 
-        t0 = time.time()
+        # baseline forward (pre-TTA)
+        t_pre0 = time.time()
         score, pred_mask_tensor = eval_fn(batch, model, category_ids=cond_ids)
-        pre_infer_time_sum += (time.time() - t0)
+        pre_infer_time_sum += (time.time() - t_pre0)
         pred_mask_base = pred_mask_tensor.detach().cpu().abs().sum(dim=-1).numpy()
         xyz_np = batch['xyz_original'].numpy()
         xyz_list.append(xyz_np)
@@ -377,6 +411,62 @@ def eval(cfgs):
                 pred_mask_pre = pred_mask_pre[inds].mean(axis=1)
             except Exception as e:
                 print(f'[smooth_knn] apply(pre) failed: {e}')
+
+        # optional TTT adaptation before final inference / TTA fusion
+        if getattr(cfg, 'ttt_enable', False) and int(getattr(cfg, 'ttt_steps', 0)) > 0:
+            t_ttt0 = time.time()
+            try:
+                steps = int(getattr(cfg, 'ttt_steps', 1))
+                lr = float(getattr(cfg, 'ttt_lr', 1e-4))
+                # select parameters from the last head only
+                params = []
+                for n, p in model.named_parameters():
+                    if n.startswith('linear_offset'):
+                        p.requires_grad = True
+                        params.append(p)
+                    else:
+                        p.requires_grad = False
+                opt = torch.optim.SGD(params, lr=lr, momentum=0.0)
+                for _ in range(steps):
+                    opt.zero_grad()
+                    # base forward
+                    score0, pred0 = eval_fn(batch, model, category_ids=cond_ids)
+                    obj0 = pred0.abs().sum(dim=-1).mean()
+                    # weak view: small rotate + jitter
+                    base_xyz = batch['xyz_original'].numpy()
+                    import math, MinkowskiEngine as ME
+                    deg = float(getattr(cfg, 'ttt_weak_rotate_deg', 2.0))
+                    ax, ay, az = np.deg2rad(np.random.uniform(-deg, deg, size=3))
+                    Rx = np.array([[1,0,0],[0,math.cos(ax),-math.sin(ax)],[0,math.sin(ax),math.cos(ax)]], dtype=np.float32)
+                    Ry = np.array([[math.cos(ay),0,math.sin(ay)],[0,1,0],[-math.sin(ay),0,math.cos(ay)]], dtype=np.float32)
+                    Rz = np.array([[math.cos(az),-math.sin(az),0],[math.sin(az),math.cos(az),0],[0,0,1]], dtype=np.float32)
+                    R = Rz @ Ry @ Rx
+                    xyz_w = base_xyz @ R.T
+                    sj = float(getattr(cfg, 'ttt_weak_jitter', 0.001))
+                    if sj > 0:
+                        xyz_w = xyz_w + np.random.normal(scale=sj, size=xyz_w.shape).astype(np.float32)
+                    q, f, index, inv = ME.utils.sparse_quantize(xyz_w.astype(np.float32), xyz_w.astype(np.float32), quantization_size=cfg.voxel_size, return_index=True, return_inverse=True)
+                    xyz_voxel_t, feat_voxel_t = ME.utils.sparse_collate([q],[f])
+                    if isinstance(inv, np.ndarray): v2p_t = torch.from_numpy(inv).long()
+                    elif torch.is_tensor(inv): v2p_t = inv.long().cpu()
+                    else: v2p_t = torch.as_tensor(inv, dtype=torch.long)
+                    batch_count_t = torch.tensor([0, xyz_w.shape[0]], dtype=torch.int64)
+                    tta_batch = {'xyz_voxel': xyz_voxel_t, 'feat_voxel': feat_voxel_t, 'v2p_index': v2p_t, 'batch_count': batch_count_t}
+                    _, pred_w = eval_fn(tta_batch, model, category_ids=cond_ids)
+                    objw = pred_w.abs().sum(dim=-1).mean()
+                    # losses
+                    loss_cons = (objw - obj0).pow(2)
+                    loss_reg = 0.0
+                    lam_reg = float(getattr(cfg, 'ttt_reg', 1e-3))
+                    if lam_reg > 0:
+                        for p in params:
+                            loss_reg = loss_reg + p.pow(2).sum()
+                    loss = float(getattr(cfg, 'ttt_consistency', 1.0)) * loss_cons + lam_reg * loss_reg
+                    loss.backward()
+                    opt.step()
+            except Exception as e:
+                print(f'[TTT] failed: {e}')
+            ttt_time_sum += (time.time() - t_ttt0)
 
         # TTA multi-view geometric augmentations -> post mask
         pred_mask_post = pred_mask_pre.copy()
@@ -497,6 +587,38 @@ def eval(cfgs):
                 hit = int(C[i, j])
                 ratio = hit / int(col_sums[j])
                 print(f"  cluster {j} -> class {i} hit={hit}/{int(col_sums[j])} ({ratio:.2%})")
+            # optional save confusion matrix image
+            if getattr(cfg, 'save_confmat', False):
+                try:
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    import matplotlib.pyplot as plt
+                    out_path = getattr(cfg, 'confmat_out', '')
+                    if not out_path:
+                        out_path = os.path.join(cfg.logpath, 'confusion_matrix.png')
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    plt.figure(figsize=(max(4, n_clu*0.6), max(3, n_cls*0.6)))
+                    im = plt.imshow(C, cmap='Blues', aspect='auto')
+                    plt.colorbar(im, fraction=0.046, pad=0.04)
+                    plt.xlabel('Predicted cluster id')
+                    plt.ylabel('True class id')
+                    plt.title('Cluster vs Class Confusion')
+                    # tick labels
+                    plt.xticks(range(n_clu), range(n_clu))
+                    plt.yticks(range(n_cls), range(n_cls))
+                    # annotate counts (avoid clutter on large mats)
+                    if n_cls * n_clu <= 400:
+                        for ii in range(n_cls):
+                            for jj in range(n_clu):
+                                val = int(C[ii, jj])
+                                if val > 0:
+                                    plt.text(jj, ii, str(val), ha='center', va='center', fontsize=7, color='black')
+                    plt.tight_layout()
+                    plt.savefig(out_path, dpi=200)
+                    plt.close()
+                    print(f"[ConfMat] saved to {out_path}")
+                except Exception as e:
+                    print(f"[ConfMat] save failed: {e}")
         else:
             print("[Cluster-Class][Confusion] no valid (true, predicted) pairs to summarize.")
 
@@ -566,12 +688,23 @@ def eval(cfgs):
 
     # Print pre/post inference timing summary
     if sample_count > 0:
+        methods = []
+        if getattr(cfg, 'bn_tta', False): methods.append('bn-tta')
+        if getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0: methods.append(f'geom({int(cfg.tta_views)})')
+        if getattr(cfg, 'ttt_enable', False) and int(getattr(cfg, 'ttt_steps', 0)) > 0: methods.append('ttt')
+        if getattr(cfg, 'proto_ema', False): methods.append('proto-ema')
+        methods_str = ','.join(methods) if methods else 'none'
+        print(f"[TTA] methods={methods_str}")
         print(f"[TTA-Time] pre_infer_total={pre_infer_time_sum:.4f}s, per_sample={pre_infer_time_sum/sample_count:.4f}s")
-        if getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0:
-            print(f"[TTA-Time] tta_infer_total={post_infer_time_sum:.4f}s, per_sample={post_infer_time_sum/sample_count:.4f}s, views={int(cfg.tta_views)}")
+        if post_infer_time_sum > 0:
+            print(f"[TTA-Time] geom_infer_total={post_infer_time_sum:.4f}s, per_sample={post_infer_time_sum/sample_count:.4f}s")
+        if ttt_time_sum > 0:
+            print(f"[TTA-Time] ttt_total={ttt_time_sum:.4f}s, per_sample={ttt_time_sum/sample_count:.4f}s")
+        if bn_tta_time_total > 0:
+            print(f"[TTA-Time] bn_tta_refresh_total={bn_tta_time_total:.4f}s")
 
-    # If TTA is enabled, also report pre/post global metrics for comparison
-    if getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0:
+    # If any TTA is enabled, also report pre/post global metrics for comparison
+    if (getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0) or getattr(cfg, 'ttt_enable', False) or getattr(cfg, 'bn_tta', False) or getattr(cfg, 'proto_ema', False):
         def compute_global(labels_, scores_, masks_):
             auc_roc_ = safe_auc_roc(np.array(labels_), np.array(scores_))
             auc_pr_ = safe_ap(np.array(labels_), np.array(scores_))

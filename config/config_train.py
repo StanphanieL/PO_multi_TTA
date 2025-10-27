@@ -44,6 +44,12 @@ def get_parser():
     parser.add_argument('--in_channels', type=int, default=3, help='in channels')
     parser.add_argument('--out_channels', type=int, default=32, help='backbone feat channels')
 
+    # single-view simulation for stage-2 training (mainly for Real3D)
+    parser.add_argument('--partial_view_train', action='store_true', help='simulate single-view by removing back/occluded points during training')
+    parser.add_argument('--partial_view_prob', type=float, default=0.9, help='probability to apply partial-view simulation per sample (0~1)')
+    parser.add_argument('--partial_view_ratio', type=float, default=0.4, help='approx ratio of points removed when simulating single view (e.g., 0.4)')
+    parser.add_argument('--partial_view_method', type=str, default='plane', help='method: plane (random plane cut) or normal (use mesh normals)')
+
     # class-conditional offset head (stage 2)
     parser.add_argument('--class_embed_dim', type=int, default=32, help='class embedding dim for conditional offset head; set 0 to disable')
     parser.add_argument('--conditional_mode', type=str, default='film', help='conditional mode for offset head: concat or film') #将类别信息整合到偏移头中的方式

@@ -22,7 +22,7 @@ def get_parser():
     parser.add_argument('--categories', type=str, default='', help='multi-categories for cluster eval, e.g., "all"')
     parser.add_argument('--batch_size', type=int, default=1, help='batch_size for single GPU')
     parser.add_argument('--data_repeat', type=int, default=100, help='repeat the date for each epoch')
-    parser.add_argument('--mask_num', type=int, default=32)
+    parser.add_argument('--mask_num', type=int, default=64)
 
     # DataLoader performance options
     parser.add_argument('--pin_memory', action='store_true', help='enable DataLoader pin_memory')
@@ -57,6 +57,10 @@ def get_parser():
     parser.add_argument('--metrics_csv', type=str, default='./result/metrics_debug.csv', help='optional path to save per-cluster/category metrics CSV')
     parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
     parser.add_argument('--metrics_md', type=str, default='', help='optional path to save console outputs (metrics/timing) into a markdown file')
+    
+    # confusion matrix visualization
+    parser.add_argument('--save_confmat', action='store_true', help='save cluster-vs-class confusion matrix image when cluster assigner is used')
+    parser.add_argument('--confmat_out', type=str, default='', help='output path of the confusion matrix image (png)')
 
     # additional evaluation options
     parser.add_argument('--point_macro_ap', action='store_true', help='compute per-sample point-level AP and report macro average')
@@ -75,11 +79,30 @@ def get_parser():
     parser.add_argument('--npz_dir', type=str, default='./results/vis', help='directory to save .npz files')
 
     # Test-time augmentation (multi-view) options
-    parser.add_argument('--tta_views', type=int, default=2, help='number of TTA geometric views (0 disables)')
+    parser.add_argument('--tta_views', type=int, default=0, help='number of TTA geometric views (0 disables)')
     parser.add_argument('--tta_rotate_deg', type=float, default=5.0, help='max absolute rotation (degrees) around each axis for TTA')
     parser.add_argument('--tta_scale', type=float, default=0.05, help='uniform scale jitter range [+/- tta_scale] for TTA')
     parser.add_argument('--tta_jitter', type=float, default=0.002, help='Gaussian jitter sigma for TTA (applied per point)')
     parser.add_argument('--tta_reduce', type=str, default='mean', help='reduce fused TTA scores: mean or max')
+
+    # BN-TTA (AdaBN)
+    parser.add_argument('--bn_tta', action='store_true', help='enable BN-TTA (AdaBN) to refresh BN stats with a few test samples')
+    parser.add_argument('--bn_tta_samples', type=int, default=16, help='number of samples to run through the model to refresh BN stats')
+
+    # Prototype EMA during eval (cluster assigner required)
+    parser.add_argument('--proto_ema', action='store_true', help='enable prototype EMA update during evaluation')
+    parser.add_argument('--proto_ema_m', type=float, default=0.99, help='prototype EMA momentum (higher=slower update)')
+    parser.add_argument('--proto_ema_tau', type=float, default=0.8, help='confidence threshold on predicted cluster prob to update prototype')
+
+    # Test-Time Training (light adaptation on last head)
+    parser.add_argument('--ttt_enable', action='store_true', help='enable light test-time training (adapt last head)')
+    parser.add_argument('--ttt_steps', type=int, default=0, help='number of ttt optimization steps per sample (0 disables)')
+    parser.add_argument('--ttt_lr', type=float, default=1e-4, help='learning rate for ttt optimizer')
+    parser.add_argument('--ttt_consistency', type=float, default=1.0, help='weight of consistency loss between weak view and original')
+    parser.add_argument('--ttt_reg', type=float, default=1e-3, help='L2 weight decay on adapted params during ttt')
+    parser.add_argument('--ttt_entropy', type=float, default=0.0, help='optional entropy minimization weight (on score distribution)')
+    parser.add_argument('--ttt_weak_rotate_deg', type=float, default=2.0, help='weak rotation (deg) for ttt view')
+    parser.add_argument('--ttt_weak_jitter', type=float, default=0.001, help='weak jitter sigma for ttt view')
 
     args = parser.parse_args()
     return args

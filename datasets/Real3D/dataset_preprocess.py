@@ -87,6 +87,11 @@ class Dataset:
         self.data_repeat = cfg.data_repeat
         self.voxel_size = cfg.voxel_size
         self.mask_num = cfg.mask_num
+        # train single-view simulation options
+        self.partial_view_train = getattr(cfg, 'partial_view_train', False)
+        self.partial_view_prob = float(getattr(cfg, 'partial_view_prob', 0.0))
+        self.partial_view_ratio = float(getattr(cfg, 'partial_view_ratio', 0.4))
+        self.partial_view_method = getattr(cfg, 'partial_view_method', 'plane').lower()
         # perf options
         self.pin_memory = getattr(cfg, 'pin_memory', False)
         self.prefetch_factor = getattr(cfg, 'prefetch_factor', 2)
@@ -261,9 +266,9 @@ class Dataset:
         feat_voxel_2 = []
 
         # --- Probability to apply partial view simulation ---
-        partial_view_prob = 1.0 # Example: Apply partial view 50% of the time
+        partial_view_prob = 0.9 # Example: Apply partial view 50% of the time
         # --- Ratio of points to remove when applying partial view ---
-        partial_view_ratio = 0.35 # Example: Remove approx 40% of points
+        partial_view_ratio = 0.4 # Example: Remove approx 40% of points
 
         for i, idx in enumerate(id):
             fn_path, cat_id = self.train_file_list[idx]
@@ -436,11 +441,24 @@ class Dataset:
                         np.savez(cache_key, coord=coord.astype(np.float32), normal=vertex_normals.astype(np.float32))
                     except Exception:
                         pass
+
+            # optional single-view simulation BEFORE standard aug to mimic test partial scans
+            if self.partial_view_train and random.random() < self.partial_view_prob:
+                try:
+                    if self.partial_view_method == 'normal' and vertex_normals is not None and vertex_normals.shape[0] == coord.shape[0]:
+                        coord_sv, normals_sv = simulate_partial_view(coord, normals=vertex_normals, view_loss_ratio=self.partial_view_ratio)
+                    else:
+                        coord_sv, normals_sv = simulate_partial_view(coord, normals=None, view_loss_ratio=self.partial_view_ratio)
+                    # fallback if too few points remain
+                    if coord_sv is not None and coord_sv.shape[0] > max(128, int(0.2 * coord.shape[0])):
+                        coord, vertex_normals = coord_sv, (normals_sv if normals_sv is not None else vertex_normals[:coord_sv.shape[0]] if vertex_normals is not None else None)
+                except Exception:
+                    pass
+
             mask = np.ones(coord.shape[0]) * -1
 
             Point_dict = {'coord': coord, 'normal': vertex_normals, 'mask': mask}
             Point_dict, centers = self.train_aug_compose(Point_dict)
-
             xyz = Point_dict['coord'].astype(np.float32)
             normal = Point_dict['normal'].astype(np.float32)
             mask = Point_dict['mask'].astype(np.int32)
