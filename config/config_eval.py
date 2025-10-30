@@ -77,6 +77,7 @@ def get_parser():
     # BN-TTA (AdaBN)
     parser.add_argument('--bn_tta', action='store_true', help='enable BN-TTA (AdaBN) to refresh BN stats with a few test samples')
     parser.add_argument('--bn_tta_samples', type=int, default=16, help='number of samples to run through the model to refresh BN stats')
+    parser.add_argument('--bn_tta_compare', action='store_true', help='compute and print BN-TTA pre/post global metrics for comparison')
 
     # Prototype EMA during eval (cluster assigner required)
     parser.add_argument('--proto_ema', action='store_true', help='enable prototype EMA update during evaluation')

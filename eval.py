@@ -227,10 +227,126 @@ def eval(cfgs):
     dataset.testLoader()
     print(f'Test samples: {len(dataset.test_file_list)}')
 
-    
+    # Helper: run a baseline global evaluation (no TTT/TTA), used for BN pre/post comparison
+    def _run_global_baseline(model_local):
+        model_local.eval()
+        labels_b, scores_b = [], []
+        pred_masks_b, gt_masks_b = [], []
+        from pathlib import Path as _Path
+        from sklearn.metrics import roc_auc_score as _roc_auc_score, average_precision_score as _avg_prec
+        def _safe_auc(y_true, y_score):
+            y_true = np.array(y_true); y_score = np.array(y_score)
+            if len(np.unique(y_true)) < 2: return np.nan
+            try: return _roc_auc_score(y_true, y_score)
+            except Exception: return np.nan
+        def _safe_ap(y_true, y_score):
+            y_true = np.array(y_true); y_score = np.array(y_score)
+            if len(np.unique(y_true)) < 2: return np.nan
+            try: return _avg_prec(y_true, y_score)
+            except Exception: return np.nan
+        for _i, _batch in enumerate(dataset.test_data_loader):
+            # determine conditioning id like main path
+            _sample_path = _batch['fn'][0]
+            _parts = _Path(_sample_path).parts
+            _true_cat = _parts[-3] if len(_parts) >= 3 else ''
+            if hasattr(dataset, 'cat2id') and _true_cat in dataset.cat2id:
+                _true_id = dataset.cat2id[_true_cat]
+            else:
+                _true_id = -1
+            # optional cluster id if needed
+            _cid = -1
+            if assigner is not None and proto is not None and (need_cluster_preds_for_cond or getattr(cfg, 'cluster_norm', False)):
+                with torch.no_grad():
+                    import torch.nn.functional as F
+                    _z = assigner.forward_embed(_batch['feat_voxel'], _batch['xyz_voxel'])
+                    _logits = torch.matmul(_z, proto.T)
+                    _cid = int(torch.argmax(_logits, dim=1).item())
+            if cond_src == 'true':
+                _cond_cid = _true_id
+            elif cond_src == 'cluster':
+                _cond_cid = _cid if _cid >= 0 else -1
+            elif cond_src == 'none':
+                _cond_cid = -1
+            else:  # auto
+                _cond_cid = _cid if _cid >= 0 else _true_id
+            _cond_ids = None if _cond_cid < 0 else torch.tensor([_cond_cid], dtype=torch.long).cuda()
+            # forward once (no ttt/tta)
+            with torch.no_grad():
+                _score, _pred_mask_tensor = eval_fn(_batch, model_local, category_ids=_cond_ids,
+                                                    quantile=getattr(cfg, 'score_quantile', 0.95),
+                                                    score_method=getattr(cfg, 'score_method', 'quantile'))
+            _pred_mask = _pred_mask_tensor.detach().cpu().abs().sum(dim=-1).numpy()
+            _xyz_np = _batch['xyz_original'].numpy()
+            # optional smoothing
+            if getattr(cfg, 'smooth_knn', 0) and cfg.smooth_knn > 0:
+                try:
+                    from sklearn.neighbors import NearestNeighbors
+                    _k = min(cfg.smooth_knn, _xyz_np.shape[0])
+                    _nbrs = NearestNeighbors(n_neighbors=_k, algorithm='auto').fit(_xyz_np)
+                    _inds = _nbrs.kneighbors(_xyz_np, return_distance=False)
+                    _pred_mask = _pred_mask[_inds].mean(axis=1)
+                except Exception as _e:
+                    print(f'[BN-Compare][smooth_knn] failed: {_e}')
+            # gt mask
+            _sample_name = _sample_path.split('/')[-1].split('.')[0]
+            if tag in _sample_name:
+                _gt_this = np.zeros(_batch['xyz_original'].shape[0])
+            else:
+                if cfg.dataset == 'AnomalyShapeNet':
+                    _gt_mask_path = f'datasets/AnomalyShapeNet/dataset/pcd/{_true_cat}/GT/'
+                    _gt_this = np.loadtxt(_gt_mask_path + _sample_name + '.txt', delimiter=',')[:, 3:].squeeze(1)
+                elif cfg.dataset == 'Real3D':
+                    _gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{_true_cat}/gt/'
+                    _gt_file = _gt_mask_path + _sample_name + '.txt'
+                    try:
+                        _arr = np.loadtxt(_gt_file)
+                    except Exception:
+                        _arr = np.loadtxt(_gt_file, delimiter=',')
+                    if _arr.ndim == 1:
+                        _gt_this = np.array(_arr[-1:]).reshape(-1)
+                    else:
+                        _gt_this = _arr[:, -1].reshape(-1)
+            pred_masks_b.append(_pred_mask)
+            gt_masks_b.append(_gt_this)
+            labels_b += _batch['labels'].numpy().tolist()
+            # object score per method
+            if getattr(cfg, 'score_method', 'mean') == 'mean':
+                _obj_score = float(np.mean(_pred_mask))
+            elif getattr(cfg, 'score_method', 'mean') == 'max':
+                _obj_score = float(np.max(_pred_mask))
+            else:
+                _q = getattr(cfg, 'score_quantile', 0.95)
+                _obj_score = float(np.quantile(_pred_mask, _q))
+            scores_b.append(_obj_score)
+        # compute global metrics with global min-max for point scores
+        _labels = np.array(labels_b); _scores = np.array(scores_b)
+        _auc_roc = _safe_auc(_labels, _scores)
+        _auc_pr = _safe_ap(_labels, _scores)
+        _point_all = np.concatenate(pred_masks_b, axis=0)
+        _pmin, _pmax = np.min(_point_all), np.max(_point_all)
+        _den = (_pmax - _pmin) + 1e-12
+        _point_all = (_point_all - _pmin) / _den
+        _gt_all = np.concatenate(gt_masks_b, axis=0)
+        _pt_auc_roc = _safe_auc(_gt_all, _point_all)
+        _pt_auc_pr = _safe_ap(_gt_all, _point_all)
+        return {
+            'obj_auc': _auc_roc,
+            'obj_ap': _auc_pr,
+            'pt_auc': _pt_auc_roc,
+            'pt_ap': _pt_auc_pr,
+            'n': len(_labels)
+        }
+
     # BN-TTA: refresh BN running stats using a few test samples
     if getattr(cfg, 'bn_tta', False) and int(getattr(cfg, 'bn_tta_samples', 0)) > 0: #?
         try:
+            # optional pre-BN baseline metrics
+            pre_bn_metrics = None
+            if getattr(cfg, 'bn_tta_compare', False):
+                print('[BN-Compare] computing baseline metrics before BN refresh ...')
+                pre_bn_metrics = _run_global_baseline(model)
+                print(f"[BN-pre] object AUC-ROC: {pre_bn_metrics['obj_auc']}, point AUC-ROC: {pre_bn_metrics['pt_auc']}, object AUCP-PR: {pre_bn_metrics['obj_ap']}, point AUCP-PR: {pre_bn_metrics['pt_ap']}")
+
             n_bntta = int(min(getattr(cfg, 'bn_tta_samples', 16), len(dataset.test_file_list)))
             print(f'[BN-TTA] refreshing BN stats with {n_bntta} samples ...')
             t_start_bn = time.time()
@@ -238,12 +354,57 @@ def eval(cfgs):
             with torch.no_grad():
                 it = 0
                 for batch in dataset.test_data_loader:
-                    _ = model.test_inference(batch['feat_voxel'], batch['xyz_voxel'], batch['v2p_index'], batch_count=batch.get('batch_count', None), category_ids=None)
+                    # determine cond ids for BN update (use same policy as main)
+                    # true category id
+                    try:
+                        true_cat_bn = Path(batch['fn'][0]).parts[-3]
+                    except Exception:
+                        true_cat_bn = ''
+                    if hasattr(dataset, 'cat2id') and true_cat_bn in dataset.cat2id:
+                        true_id_bn = dataset.cat2id[true_cat_bn]
+                    else:
+                        true_id_bn = -1
+                    # optional predicted cluster
+                    cid_bn = -1
+                    if assigner is not None and proto is not None and (need_cluster_preds_for_cond or getattr(cfg, 'cluster_norm', False)):
+                        try:
+                            z_bn = assigner.forward_embed(batch['feat_voxel'], batch['xyz_voxel'])
+                            logits_bn = torch.matmul(z_bn, proto.T)
+                            cid_bn = int(torch.argmax(logits_bn, dim=1).item())
+                        except Exception:
+                            cid_bn = -1
+                    if cond_src == 'true':
+                        cond_cid_bn = true_id_bn
+                    elif cond_src == 'cluster':
+                        cond_cid_bn = cid_bn if cid_bn >= 0 else -1
+                    elif cond_src == 'none':
+                        cond_cid_bn = -1
+                    else:  # auto
+                        cond_cid_bn = cid_bn if cid_bn >= 0 else true_id_bn
+                    cond_ids_bn = None if cond_cid_bn < 0 else torch.tensor([cond_cid_bn], dtype=torch.long).cuda()
+                    # forward to update BN running stats (no gradients)
+                    _ = model.test_inference(batch['feat_voxel'], batch['xyz_voxel'], batch['v2p_index'], batch_count=batch.get('batch_count', None), category_ids=cond_ids_bn)
                     it += 1
                     if it >= n_bntta:
                         break
             model.eval()
             bn_tta_time_total = time.time() - t_start_bn
+
+            # optional post-BN baseline metrics
+            if getattr(cfg, 'bn_tta_compare', False):
+                print('[BN-Compare] computing metrics after BN refresh ...')
+                post_bn_metrics = _run_global_baseline(model)
+                print(f"[BN-post] object AUC-ROC: {post_bn_metrics['obj_auc']}, point AUC-ROC: {post_bn_metrics['pt_auc']}, object AUCP-PR: {post_bn_metrics['obj_ap']}, point AUCP-PR: {post_bn_metrics['pt_ap']}")
+                try:
+                    def _fmt(x):
+                        return 'nan' if (x is None or (isinstance(x, float) and np.isnan(x))) else f"{x:.6f}"
+                    d1 = (post_bn_metrics['obj_auc'] - pre_bn_metrics['obj_auc']) if (pre_bn_metrics and post_bn_metrics) else None
+                    d2 = (post_bn_metrics['pt_auc'] - pre_bn_metrics['pt_auc']) if (pre_bn_metrics and post_bn_metrics) else None
+                    d3 = (post_bn_metrics['obj_ap'] - pre_bn_metrics['obj_ap']) if (pre_bn_metrics and post_bn_metrics) else None
+                    d4 = (post_bn_metrics['pt_ap'] - pre_bn_metrics['pt_ap']) if (pre_bn_metrics and post_bn_metrics) else None
+                    print(f"[BN-delta] objAUC={_fmt(d1)} ptAUC={_fmt(d2)} objAP={_fmt(d3)} ptAP={_fmt(d4)}")
+                except Exception:
+                    pass
         except Exception as e:
             print(f'[BN-TTA] failed: {e}')
 
@@ -251,7 +412,7 @@ def eval(cfgs):
     pre_infer_time_sum = 0.0           # baseline forward per sample
     post_infer_time_sum = 0.0          # extra TTA forward time (geom views)
     ttt_time_sum = 0.0                 # TTT adaptation time
-    bn_tta_time_total = 0.0            # BN refresh time (global)
+    bn_tta_time_total = bn_tta_time_total if 'bn_tta_time_total' in locals() else 0.0            # BN refresh time (global)
     sample_count = 0
     
 
