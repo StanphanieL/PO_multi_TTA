@@ -60,7 +60,9 @@ Trains PONet with conditional head (concat / FiLM).
 - Score normalization and export:
   - `--cluster_norm_type {minmax,zscore,mad}`
   - `--metrics_csv out.csv` (per-cluster/category + global)
-  - `--point_macro_ap` `--sample_norm` `--print_pos_rate`
+  - `--print_pos_rate`
+  - `--score_method {mean,max,quantile}` (method for sample-level anomaly score calculation)
+  - `--score_quantile Q` (quantile value for sample-level score, default 0.95, used with --score_method quantile)
 - Category filter:
   - `--eval_category_only <cat_name>` (subset to one category)
 
@@ -90,7 +92,8 @@ python eval.py --dataset AnomalyShapeNet \
   --cluster_norm --contrastive_ckpt ./log/ashape_contrast/best.pth --proj_dim 128 \
   --cluster_norm_type mad --metrics_csv ./results/ashape_metrics.csv \
   --logpath ./log/ashape_po3ad/ --checkpoint_name best.pth \
-  --tta_mode geom --tta_views 4 --smooth_knn 16 --point_macro_ap --sample_norm --print_pos_rate
+  --tta_mode geom --tta_views 4 --smooth_knn 16 --print_pos_rate \
+  --score_method quantile --score_quantile 0.95
 ```
 
 ### Example: EMA only
@@ -110,7 +113,8 @@ python eval.py --dataset Real3D \
   --cluster_norm_type mad --metrics_csv ./results/real3d_metrics.csv \
   --logpath ./log/real3d_po3ad/ --checkpoint_name best.pth \
   --tta_mode geom+temp --tta_views 3 --tta_temp_type pow --tta_gamma 0.9 --tta_apply_scope both \
-  --bn_tta --bn_tta_samples 16 --smooth_knn 16 --point_macro_ap --sample_norm --print_pos_rate
+  --bn_tta --bn_tta_samples 16 --smooth_knn 16 --print_pos_rate \
+  --score_method max
 ```
 
 ## Outputs

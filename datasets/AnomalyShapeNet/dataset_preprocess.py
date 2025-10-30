@@ -124,8 +124,9 @@ class Dataset:
                                            shuffle=False, sampler=None,
                                            drop_last=False, pin_memory=self.pin_memory,
                                            worker_init_fn=self._worker_init_fn_,
-                                           persistent_workers=(self.dataset_workers>0),
-                                           prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None)
+                                           persistent_workers=(self.dataset_workers>0)
+                                        #    prefetch_factor=self.prefetch_factor if self.dataset_workers>0 else None
+                                           )
 
     def generate_pseudo_anomaly(self, points, normals, center, distance_to_move=0.08):
         distances_to_center = np.linalg.norm(points - center, axis=1)

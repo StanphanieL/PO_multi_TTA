@@ -34,8 +34,8 @@ class PONet(nn.Module):
         )
 
         self.weight_initialization()
-
-    def weight_initialization(self):
+    
+    def weight_initialization(self): # 针对MinkowskiEngine库中的特殊层类型进行了定制化的初始化，确保网络在训练开始时有一个良好的起点
         for m in self.modules():
             if isinstance(m, ME.MinkowskiConvolution):
                 ME.utils.kaiming_normal_(m.kernel, mode="fan_out", nonlinearity="relu")
@@ -129,7 +129,21 @@ def model_fn(batch, model, cfg):
 
     return loss, pred, visual_dict, meter_dict
 
-def eval_fn(batch, model, category_ids=None):
+def eval_fn(batch, model, category_ids=None, quantile=0.95, score_method='quantile'):
+    """
+    计算样本级异常得分，支持多种计算方法
+    
+    参数:
+        batch: 输入批次数据
+        model: 模型
+        category_ids: 类别ID
+        quantile: 用于计算异常得分的分位数，默认为0.95，表示使用95%分位数
+        score_method: 样本级异常得分计算方法，可选'mean'（均值）、'max'（最大值）或'quantile'（分位数）
+        
+    返回:
+        sample_score: 样本级异常得分
+        pred_offset: 预测的偏移量
+    """
     xyz_voxel = batch['xyz_voxel']
     feat_voxel = batch['feat_voxel']
     v2p_index = batch['v2p_index']
@@ -137,6 +151,19 @@ def eval_fn(batch, model, category_ids=None):
 
     with torch.no_grad():
         pred_offset = model.test_inference(feat_voxel, xyz_voxel, v2p_index, batch_count=batch_count, category_ids=category_ids)
-    sample_score = torch.mean(torch.sum(torch.abs(pred_offset.detach().cpu()), dim=-1))
-
+    
+    # 计算每个点的异常得分（L1范数）
+    point_scores = torch.sum(torch.abs(pred_offset.detach().cpu()), dim=-1)
+    
+    # 根据选择的计算方法计算样本级异常得分
+    if score_method == 'mean':
+        # 使用均值方法（原始方法）
+        sample_score = torch.mean(point_scores)
+    elif score_method == 'max':
+        # 使用最大值方法
+        sample_score = torch.max(point_scores)
+    else:  # score_method == 'quantile'
+        # 使用分位数方法
+        sample_score = torch.quantile(point_scores, quantile)
+    
     return sample_score, pred_offset

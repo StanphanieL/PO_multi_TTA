@@ -18,14 +18,14 @@ def load_checkpoint(model, pretrain_file, gpu=0):
     map_location = {'cuda:0': 'cuda:{}'.format(gpu)} if gpu > 0 else None
     checkpoint = torch.load(pretrain_file, map_location=map_location)
     model_dict = checkpoint['model']
-    for k, v in model_dict.items():
+    for k, v in model_dict.items(): #移除module前缀，PyTorch会自动在每个参数名前添加'module.'前缀。但在单GPU加载时，模型不需要此前缀
         if 'module.' in k:
             model_dict = {k[len('module.'):]: v for k, v in model_dict.items()}
         break
     model.load_state_dict(model_dict, strict=False)
 
 
-def load_contrastive_checkpoint(model, pretrain_file):
+def load_contrastive_checkpoint(model, pretrain_file): #加载对比学习checkpoint并提取原型向量
     ckpt = torch.load(pretrain_file, map_location='cuda')
     model.load_state_dict(ckpt['model'], strict=False)
     prototypes = None
@@ -51,14 +51,14 @@ def eval_cluster(cfg):
     print(f'Cluster eval - test samples: {len(dataset.test_file_list)}')
 
     model = POContrast(cfg.in_channels, cfg.out_channels, proj_dim=cfg.proj_dim).cuda()
-    proto = load_contrastive_checkpoint(model, cfg.logpath + cfg.checkpoint_name)
+    proto = load_contrastive_checkpoint(model, cfg.contrastive_ckpt)
     assert proto is not None, 'Prototypes not found in contrastive checkpoint.'
     import torch.nn.functional as F
     proto = F.normalize(torch.from_numpy(proto).float().cuda() if isinstance(proto, np.ndarray) else proto, dim=1)
 
     model.eval()
-    correct = 0
-    total = 0
+    correct = 0 #预测正确的数量
+    total = 0 #总样本数
 
     per_class_total = {}
     per_class_correct = {}
@@ -68,8 +68,8 @@ def eval_cluster(cfg):
         with torch.no_grad():
             z = model.forward_embed(batch['feat_voxel'], batch['xyz_voxel'])
             z = F.normalize(z, dim=1)
-            logits = torch.matmul(z, proto.T)
-            pred = torch.argmax(logits, dim=1).item()
+            logits = torch.matmul(z, proto.T) #计算嵌入向量与所有原型向量的点积
+            pred = torch.argmax(logits, dim=1).item() # 取相似度最大的作为预测类别
         # get true class id from path
         fn_path = batch['fn'][0]
         # category folder is -3 segment
@@ -110,9 +110,9 @@ def eval(cfgs):
             def __init__(self, a, b):
                 self.a = a; self.b = b
             def write(self, data):
-                self.a.write(data)
-                self.b.write(data)
-            def flush(self):
+                self.a.write(data) #写入到第一个输出流
+                self.b.write(data) #写入到第二个输出流
+            def flush(self): #刷新方式
                 try:
                     self.a.flush()
                 except Exception:
@@ -121,7 +121,7 @@ def eval(cfgs):
                     self.b.flush()
                 except Exception:
                     pass
-        sys.stdout = _Tee(orig_stdout, md_capture)
+        sys.stdout = _Tee(orig_stdout, md_capture) #输出分流
 
     if getattr(cfg, 'contrastive_eval', False) or cfg.task == 'contrastive_eval':
         eval_cluster(cfg)
@@ -177,7 +177,7 @@ def eval(cfgs):
     load_checkpoint(model, cfg.logpath + cfg.checkpoint_name)
 
     # optional cluster assigner for normalization
-    assigner = None
+    assigner = None #聚类分配器
     proto = None
     if getattr(cfg, 'cluster_norm', False):
         from network.contrast import POContrast
@@ -185,7 +185,7 @@ def eval(cfgs):
         ckpt_path = cfg.contrastive_ckpt if getattr(cfg, 'contrastive_ckpt', '') else (cfg.logpath + cfg.checkpoint_name)
         try:
             assigner = POContrast(cfg.in_channels, cfg.out_channels, proj_dim=cfg.proj_dim).cuda()
-            proto = load_contrastive_checkpoint(assigner, ckpt_path)
+            proto = load_contrastive_checkpoint(assigner, ckpt_path) #(40,128)
             import torch.nn.functional as F
             proto = F.normalize(torch.from_numpy(proto).float().cuda() if isinstance(proto, np.ndarray) else proto, dim=1)
             assigner.eval()
@@ -221,8 +221,9 @@ def eval(cfgs):
     dataset.testLoader()
     print(f'Test samples: {len(dataset.test_file_list)}')
 
+    
     # BN-TTA: refresh BN running stats using a few test samples
-    if getattr(cfg, 'bn_tta', False) and int(getattr(cfg, 'bn_tta_samples', 0)) > 0:
+    if getattr(cfg, 'bn_tta', False) and int(getattr(cfg, 'bn_tta_samples', 0)) > 0: #?
         try:
             n_bntta = int(min(getattr(cfg, 'bn_tta_samples', 16), len(dataset.test_file_list)))
             print(f'[BN-TTA] refreshing BN stats with {n_bntta} samples ...')
@@ -246,6 +247,7 @@ def eval(cfgs):
     ttt_time_sum = 0.0                 # TTT adaptation time
     bn_tta_time_total = 0.0            # BN refresh time (global)
     sample_count = 0
+    
 
     def safe_auc_roc(y_true, y_score):
         y_true = np.array(y_true)
@@ -280,7 +282,6 @@ def eval(cfgs):
     fns = []
     pred_clusters = []
     true_cats = []
-    sample_point_ap = []
     xyz_list = []
 
     # counters for conditioning decisions
@@ -331,15 +332,18 @@ def eval(cfgs):
         if assigner is not None and proto is not None:
             with torch.no_grad():
                 import torch.nn.functional as F
-                z = assigner.forward_embed(batch['feat_voxel'], batch['xyz_voxel'])
-                z = F.normalize(z, dim=1)
+                z = assigner.forward_embed(batch['feat_voxel'], batch['xyz_voxel']) #(1,128) (B,proj_dim)
+                # z = F.normalize(z, dim=1)
                 logits = torch.matmul(z, proto.T)
                 cid = torch.argmax(logits, dim=1).item()
                 # optional Prototype-EMA update with confidence gating
                 if getattr(cfg, 'proto_ema', False):
                     try:
-                        prob = torch.softmax(logits, dim=1)[0]
-                        conf, cmax = float(prob.max().item()), int(prob.argmax().item())
+                        # 使用logits最大值代替softmax概率
+                        # prob = torch.softmax(logits, dim=1)[0] # 40
+                        # conf, cmax = float(prob.max().item()), int(prob.argmax().item())
+                        logits_value = logits[0]  # 获取logits值
+                        conf, cmax = float(logits_value.max().item()), int(logits_value.argmax().item())
                         if conf >= float(getattr(cfg, 'proto_ema_tau', 0.8)):
                             m = float(getattr(cfg, 'proto_ema_m', 0.99))
                             old = proto[cmax:cmax+1]
@@ -386,7 +390,9 @@ def eval(cfgs):
 
         # baseline forward (pre-TTA)
         t_pre0 = time.time()
-        score, pred_mask_tensor = eval_fn(batch, model, category_ids=cond_ids)
+        score, pred_mask_tensor = eval_fn(batch, model, category_ids=cond_ids, 
+                                          quantile=getattr(cfg, 'score_quantile', 0.95),
+                                          score_method=getattr(cfg, 'score_method', 'quantile'))
         pre_infer_time_sum += (time.time() - t_pre0)
         pred_mask_base = pred_mask_tensor.detach().cpu().abs().sum(dim=-1).numpy()
         xyz_np = batch['xyz_original'].numpy()
@@ -399,7 +405,7 @@ def eval(cfgs):
                 from sklearn.neighbors import NearestNeighbors
                 k = min(cfg.smooth_knn, xyz_np.shape[0])
                 nbrs = NearestNeighbors(n_neighbors=k, algorithm='auto').fit(xyz_np)
-                inds = nbrs.kneighbors(xyz_np, return_distance=False)
+                inds = nbrs.kneighbors(xyz_np, return_distance=False)  # (point_num,k)
             except Exception as e:
                 print(f'[smooth_knn] failed to build index: {e}')
                 inds = None
@@ -415,7 +421,7 @@ def eval(cfgs):
         # optional TTT adaptation before final inference / TTA fusion
         if getattr(cfg, 'ttt_enable', False) and int(getattr(cfg, 'ttt_steps', 0)) > 0:
             t_ttt0 = time.time()
-            try:
+            try: # 选择最后一个head的参数
                 steps = int(getattr(cfg, 'ttt_steps', 1))
                 lr = float(getattr(cfg, 'ttt_lr', 1e-4))
                 # select parameters from the last head only
@@ -430,11 +436,13 @@ def eval(cfgs):
                 for _ in range(steps):
                     opt.zero_grad()
                     # base forward
-                    score0, pred0 = eval_fn(batch, model, category_ids=cond_ids)
+                    score0, pred0 = eval_fn(batch, model, category_ids=cond_ids,
+                                           quantile=getattr(cfg, 'score_quantile', 0.95),
+                                           score_method=getattr(cfg, 'score_method', 'quantile'))
                     obj0 = pred0.abs().sum(dim=-1).mean()
                     # weak view: small rotate + jitter
                     base_xyz = batch['xyz_original'].numpy()
-                    import math, MinkowskiEngine as ME
+                    import math, MinkowskiEngine as ME  #生成弱增强视图
                     deg = float(getattr(cfg, 'ttt_weak_rotate_deg', 2.0))
                     ax, ay, az = np.deg2rad(np.random.uniform(-deg, deg, size=3))
                     Rx = np.array([[1,0,0],[0,math.cos(ax),-math.sin(ax)],[0,math.sin(ax),math.cos(ax)]], dtype=np.float32)
@@ -452,7 +460,9 @@ def eval(cfgs):
                     else: v2p_t = torch.as_tensor(inv, dtype=torch.long)
                     batch_count_t = torch.tensor([0, xyz_w.shape[0]], dtype=torch.int64)
                     tta_batch = {'xyz_voxel': xyz_voxel_t, 'feat_voxel': feat_voxel_t, 'v2p_index': v2p_t, 'batch_count': batch_count_t}
-                    _, pred_w = eval_fn(tta_batch, model, category_ids=cond_ids)
+                    _, pred_w = eval_fn(tta_batch, model, category_ids=cond_ids,
+                                       quantile=getattr(cfg, 'score_quantile', 0.95),
+                                       score_method=getattr(cfg, 'score_method', 'quantile'))
                     objw = pred_w.abs().sum(dim=-1).mean()
                     # losses
                     loss_cons = (objw - obj0).pow(2)
@@ -502,7 +512,9 @@ def eval(cfgs):
                 batch_count_t = torch.tensor([0, xyz.shape[0]], dtype=torch.int64)
                 tta_batch = {'xyz_voxel': xyz_voxel_t, 'feat_voxel': feat_voxel_t, 'v2p_index': v2p_t, 'batch_count': batch_count_t}
                 t1 = time.time()
-                _, pred_offset_t = eval_fn(tta_batch, model, category_ids=cond_ids)
+                _, pred_offset_t = eval_fn(tta_batch, model, category_ids=cond_ids,
+                                          quantile=getattr(cfg, 'score_quantile', 0.95),
+                                          score_method=getattr(cfg, 'score_method', 'quantile'))
                 tta_time_local += (time.time() - t1)
                 tta_mask = pred_offset_t.detach().cpu().abs().sum(dim=-1).numpy()
                 tta_masks.append(tta_mask)
@@ -521,8 +533,20 @@ def eval(cfgs):
                 print(f'[smooth_knn] apply(post) failed: {e}')
 
         # object-level scores
-        obj_score_pre = float(np.mean(pred_mask_pre))
-        fused_obj_score = float(np.mean(pred_mask_post))
+        if getattr(cfg, 'score_method', 'mean') == 'mean':
+            obj_score_pre = float(np.mean(pred_mask_pre))
+            fused_obj_score = float(np.mean(pred_mask_post))
+        elif getattr(cfg, 'score_method', 'mean') == 'max':
+            obj_score_pre = float(np.max(pred_mask_pre))
+            fused_obj_score = float(np.max(pred_mask_post))
+        elif getattr(cfg, 'score_method', 'mean') == 'quantile':
+            quantile = getattr(cfg, 'score_quantile', 0.95)
+            obj_score_pre = float(np.quantile(pred_mask_pre, quantile))
+            fused_obj_score = float(np.quantile(pred_mask_post, quantile))
+        else:
+            # 默认使用mean方式
+            obj_score_pre = float(np.mean(pred_mask_pre))
+            fused_obj_score = float(np.mean(pred_mask_post))
 
         # collect (post used by main metrics)
         pred_masks_pre.append(pred_mask_pre)
@@ -547,18 +571,13 @@ def eval(cfgs):
             except Exception as e:
                 print(f'[NPZ] save failed: {e}')
 
-        # per-sample macro AP
-        if getattr(cfg, 'point_macro_ap', False):
-            pts = pred_mask_post.copy()
-            if getattr(cfg, 'sample_norm', False):
-                pass
-            sample_point_ap.append(('PENDING', pts, gt_this))
+
 
     # summary of conditioning decisions
     total_samples = len(fns)
     print(f"[Conditioning][Summary] used_cluster={used_pred_cluster}/{total_samples}, used_true={used_true_cond}, used_unconditional={used_unconditional}")
 
-    # Cluster-Class confusion / consistency summary
+    # Cluster-Class confusion / consistency summary 
     if 'cluster_assigner_ready' in locals() and cluster_assigner_ready:
         valid_pairs = [(t, p) for t, p in zip(true_cats, pred_clusters) if (t is not None and p is not None and t >= 0 and p >= 0)]
         if len(valid_pairs) > 0:
@@ -574,9 +593,9 @@ def eval(cfgs):
             for t, p in valid_pairs:
                 if 0 <= t < n_cls and 0 <= p < n_clu:
                     C[t, p] += 1
-            total_cp = int(C.sum())
-            diag = int(np.sum([C[i, i] for i in range(min(n_cls, n_clu))])) if total_cp > 0 else 0
-            diag_frac = (diag / total_cp) if total_cp > 0 else float('nan')
+            total_cp = int(C.sum()) #总样本数
+            diag = int(np.sum([C[i, i] for i in range(min(n_cls, n_clu))])) if total_cp > 0 else 0 #对角元素和
+            diag_frac = (diag / total_cp) if total_cp > 0 else float('nan') #对角元素占比
             print(f"[Cluster-Class][Confusion] valid={total_cp} classes={n_cls} clusters={n_clu}")
             print(f"[Cluster-Class][Index-consistency] diag_frac={diag_frac:.4f} (assuming cluster_id == class_id)")
             col_sums = C.sum(axis=0)
@@ -587,6 +606,10 @@ def eval(cfgs):
                 hit = int(C[i, j])
                 ratio = hit / int(col_sums[j])
                 print(f"  cluster {j} -> class {i} hit={hit}/{int(col_sums[j])} ({ratio:.2%})")
+                right_class = int(C[i, i]) #正确分类的样本数
+                right_ratio = right_class / int(col_sums[j]) #正确分类的样本数占比
+                print(f"cluster {j} -> class {i} right_class={right_class}/{int(col_sums[j])} ({right_ratio:.2%})")
+
             # optional save confusion matrix image
             if getattr(cfg, 'save_confmat', False):
                 try:
@@ -623,8 +646,8 @@ def eval(cfgs):
             print("[Cluster-Class][Confusion] no valid (true, predicted) pairs to summarize.")
 
     labels, scores = zip(*label_score)
-    labels = np.array(labels)
-    scores = np.array(scores)
+    labels = np.array(labels) #提取真实标签
+    scores = np.array(scores) #提取预测分数
 
     # define normalization function once for reuse
     def normalize_array(x, method):
@@ -671,21 +694,6 @@ def eval(cfgs):
             macro = (mean_obj, mean_pt, mean_obj_ap, mean_pt_ap)
         return stats, macro
 
-    # global metrics (no cluster norm)
-    auc_roc = safe_auc_roc(labels, scores)
-    auc_pr = safe_ap(labels, scores)
-    point_pred_all = np.concatenate(pred_masks, axis=0)
-    # global min-max
-    denom = (np.max(point_pred_all) - np.min(point_pred_all)) + 1e-12
-    point_pred_all = (point_pred_all - np.min(point_pred_all)) / denom
-    gt_all = np.concatenate(gt_masks, axis=0)
-    point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
-    point_auc_pr = safe_ap(gt_all, point_pred_all)
-    if getattr(cfg, 'print_pos_rate', False):
-        pos_rate_global = float(np.mean(gt_all))
-        print(f'[Global] pos_rate={pos_rate_global:.6f}')
-    print(f'[Global] object AUC-ROC: {auc_roc}, point AUC-ROC: {point_auc_roc}, object AUCP-PR: {auc_pr}, point AUCP-PR: {point_auc_pr}')
-
     # Print pre/post inference timing summary
     if sample_count > 0:
         methods = []
@@ -715,6 +723,8 @@ def eval(cfgs):
             point_auc_roc_ = safe_auc_roc(gt_all_, point_all)
             point_auc_pr_ = safe_ap(gt_all_, point_all)
             return auc_roc_, auc_pr_, point_auc_roc_, point_auc_pr_
+        
+
         if len(label_score_pre) == len(label_score_post) == len(pred_masks_pre) == len(pred_masks_post) and len(label_score_post) > 0:
             labels_pre_, scores_pre_ = zip(*label_score_pre)
             labels_post_, scores_post_ = zip(*label_score_post)
@@ -722,6 +732,27 @@ def eval(cfgs):
             g_obj_auc_post, g_obj_ap_post, g_pt_auc_post, g_pt_ap_post = compute_global(labels_post_, scores_post_, pred_masks_post)
             print(f'[Global-preTTA] object AUC-ROC: {g_obj_auc_pre}, point AUC-ROC: {g_pt_auc_pre}, object AUCP-PR: {g_obj_ap_pre}, point AUCP-PR: {g_pt_ap_pre}')
             print(f'[Global-postTTA] object AUC-ROC: {g_obj_auc_post}, point AUC-ROC: {g_pt_auc_post}, object AUCP-PR: {g_obj_ap_post}, point AUCP-PR: {g_pt_ap_post}')
+            
+            # Assign global metrics for CSV export
+            auc_roc = g_obj_auc_post
+            auc_pr = g_obj_ap_post
+            point_auc_roc = g_pt_auc_post
+            point_auc_pr = g_pt_ap_post
+        else:
+            # If TTA is not enabled, compute global metrics once
+            auc_roc = safe_auc_roc(labels, scores)
+            auc_pr = safe_ap(labels, scores)
+            point_pred_all = np.concatenate(pred_masks, axis=0)
+            # global min-max
+            denom = (np.max(point_pred_all) - np.min(point_pred_all)) + 1e-12
+            point_pred_all = (point_pred_all - np.min(point_pred_all)) / denom
+            gt_all = np.concatenate(gt_masks, axis=0)
+            point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
+            point_auc_pr = safe_ap(gt_all, point_pred_all)
+            if getattr(cfg, 'print_pos_rate', False):
+                pos_rate_global = float(np.mean(gt_all))
+                print(f'[Global] pos_rate={pos_rate_global:.6f}') #全局异常点所占比例
+            print(f'[Global] object AUC-ROC: {auc_roc}, point AUC-ROC: {point_auc_roc}, object AUCP-PR: {auc_pr}, point AUCP-PR: {point_auc_pr}')
 
     # Global AUPRO (optional)
     if getattr(cfg, 'compute_aupro', False):
@@ -741,18 +772,7 @@ def eval(cfgs):
         except Exception as e:
             print(f'[AUPRO] computation failed: {e}')
 
-    # compute per-sample macro AP if requested
-    if getattr(cfg, 'point_macro_ap', False) and len(sample_point_ap) == len(pred_masks):
-        macro_list = []
-        norm_type = getattr(cfg, 'cluster_norm_type', 'minmax')
-        for idx, (_, pts, gt) in enumerate(sample_point_ap):
-            pts_n = normalize_array(pts, norm_type) if getattr(cfg, 'sample_norm', False) else pts
-            ap = safe_ap(gt, pts_n)
-            if not np.isnan(ap):
-                macro_list.append(ap)
-        if len(macro_list) > 0:
-            macro_ap = float(np.nanmean(macro_list))
-            print(f'[Sample-macro] point AP (macro over samples) = {macro_ap}')
+
 
     # cluster-based normalization and per-cluster/per-category metrics
     if assigner is not None and proto is not None:
@@ -761,7 +781,7 @@ def eval(cfgs):
 
         norm_type = getattr(cfg, 'cluster_norm_type', 'minmax')
         # group by predicted cluster
-        groups = defaultdict(list)
+        groups = defaultdict(list) #groups字典存储每个聚类簇的样本索引： key为聚类簇ID，value为该簇的样本索引列表
         for idx, cid in enumerate(pred_clusters):
             groups[cid].append(idx)
 
@@ -801,6 +821,23 @@ def eval(cfgs):
                 writer.writerow(['section','id','N','objAUC','ptAUC','objAP','ptAP','norm','pos_rate'])
                 # global
                 pos_rate_global = float(np.mean(gt_all)) if getattr(cfg, 'print_pos_rate', False) else ''
+                # Ensure variables are defined
+                if 'auc_roc' not in locals():
+                    auc_roc = safe_auc_roc(labels, scores)
+                    print("auc_roc is not in locals, recomputing this metric")
+                if 'point_auc_roc' not in locals():
+                    point_pred_all = np.concatenate(pred_masks, axis=0)
+                    denom = (np.max(point_pred_all) - np.min(point_pred_all)) + 1e-12
+                    point_pred_all = (point_pred_all - np.min(point_pred_all)) / denom
+                    gt_all = np.concatenate(gt_masks, axis=0)
+                    point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
+                    print("point_auc_roc is not in locals, recomputing this metric")
+                if 'auc_pr' not in locals():
+                    auc_pr = safe_ap(labels, scores)
+                    print("auc_pr is not in locals, recomputing this metric")
+                if 'point_auc_pr' not in locals():
+                    point_auc_pr = safe_ap(gt_all, point_pred_all)
+                    print("point_auc_pr is not in locals, recomputing this metric")
                 writer.writerow(['global','all',len(labels),auc_roc,point_auc_roc,auc_pr,point_auc_pr,'global-minmax',pos_rate_global])
                 # clusters
                 for cid, v in sorted(cluster_stats.items(), key=lambda x: x[0]):
@@ -812,9 +849,7 @@ def eval(cfgs):
                     writer.writerow(['category',tc,v[4],v[0],v[1],v[2],v[3],norm_type,'' if v[5] is None else v[5]])
                 if macro_cat is not None:
                     writer.writerow(['category-macro','avg','',macro_cat[0],macro_cat[1],macro_cat[2],macro_cat[3],norm_type,''])
-                # per-sample macro AP
-                if getattr(cfg, 'point_macro_ap', False) and len(sample_point_ap) == len(pred_masks):
-                    writer.writerow(['sample-macro','ptAP',len(pred_masks),'','','',macro_ap,'', ''])
+
             print(f'[Metrics CSV] saved to {csv_path}')
         except Exception as e:
             print(f'[Metrics CSV] failed to save: {e}')
@@ -832,61 +867,7 @@ def eval(cfgs):
         except Exception as e:
             print(f'[Metrics MD] failed to save: {e}')
     else:
-        # ensure stdout restored
         sys.stdout = orig_stdout
-        # if macro_cluster is not None:
-        #     print(f'  [cluster-macro] objAUC={macro_cluster[0]} ptAUC={macro_cluster[1]} objAP={macro_cluster[2]} ptAP={macro_cluster[3]}')
-
-
-        # # macro average over clusters with valid metrics
-        # macro_cluster = None
-        # if len(cluster_stats) > 0:
-        #     valid = [v for k, v in cluster_stats.items() if not (np.isnan(v[0]) or np.isnan(v[1]))]
-        #     if len(valid) > 0:
-        #         mean_obj = float(np.nanmean([v[0] for v in valid]))
-        #         mean_pt = float(np.nanmean([v[1] for v in valid]))
-        #         mean_obj_ap = float(np.nanmean([v[2] for v in valid]))
-        #         mean_pt_ap = float(np.nanmean([v[3] for v in valid]))
-        #         macro_cluster = (mean_obj, mean_pt, mean_obj_ap, mean_pt_ap)
-        #         print(f'  [cluster-macro] objAUC={mean_obj} ptAUC={mean_pt} objAP={mean_obj_ap} ptAP={mean_pt_ap}')
-
-        # # per-true-category metrics (using true category parsed from path)
-        # cat_groups = defaultdict(list)
-        # for idx, tc in enumerate(true_cats):
-        #     cat_groups[tc].append(idx)
-        # print(f"\n[Per-Category metrics (by true category) with category-wise {norm_type} normalization]")
-        # cat_stats = {}
-        # for tc, idxs in sorted(cat_groups.items(), key=lambda x: x[0]):
-        #     if tc < 0:
-        #         continue
-        #     l = labels[idxs]
-        #     s = scores[idxs]
-        #     s_n = normalize_array(s, norm_type)
-        #     auc_obj = safe_auc_roc(l, s_n)
-        #     ap_obj = safe_ap(l, s_n)
-        #     pts = np.concatenate([pred_masks[i] for i in idxs], axis=0)
-        #     gts = np.concatenate([gt_masks[i] for i in idxs], axis=0)
-        #     pts_n = normalize_array(pts, norm_type)
-        #     auc_pt = safe_auc_roc(gts, pts_n)
-        #     ap_pt = safe_ap(gts, pts_n)
-        #     pos_rate = float(np.mean(gts)) if getattr(cfg, 'print_pos_rate', False) else None
-        #     cat_stats[tc] = (auc_obj, auc_pt, ap_obj, ap_pt, len(idxs), pos_rate)
-        #     if getattr(cfg, 'print_pos_rate', False):
-        #         print(f'  [cat {tc}] N={len(idxs)} objAUC={auc_obj} ptAUC={auc_pt} objAP={ap_obj} ptAP={ap_pt} pos_rate={pos_rate:.6f}')
-        #     else:
-        #         print(f'  [cat {tc}] N={len(idxs)} objAUC={auc_obj} ptAUC={auc_pt} objAP={ap_obj} ptAP={ap_pt}')
-        # macro_cat = None
-        # if len(cat_stats) > 0:
-        #     valid = [v for k, v in cat_stats.items() if not (np.isnan(v[0]) or np.isnan(v[1]))]
-        #     if len(valid) > 0:
-        #         mean_obj = float(np.nanmean([v[0] for v in valid]))
-        #         mean_pt = float(np.nanmean([v[1] for v in valid]))
-        #         mean_obj_ap = float(np.nanmean([v[2] for v in valid]))
-        #         mean_pt_ap = float(np.nanmean([v[3] for v in valid]))
-        #         macro_cat = (mean_obj, mean_pt, mean_obj_ap, mean_pt_ap)
-        #         print(f'  [category-macro] objAUC={mean_obj} ptAUC={mean_pt} objAP={mean_obj_ap} ptAP={mean_pt_ap}')
-
-
 
 
 if __name__ == '__main__':

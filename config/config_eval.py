@@ -7,22 +7,21 @@ def get_parser():
     parser = argparse.ArgumentParser(description='3D anomaly detection')
     parser.add_argument('--task', type=str, default='eval', help='task: eval, contrastive_eval')
     parser.add_argument('--manual_seed', type=int, default=42, help='seed to produce')
-    parser.add_argument('--epochs', type=int, default=1001, help='Total epoch')
     parser.add_argument('--num_works', type=int, default=4, help='num_works for dataset (DataLoader workers)')
-    parser.add_argument('--pretrain', type=str, default='', help='path to pretrain model')
-    parser.add_argument('--save_freq', type=int, default=1, help='Pre-training model saving frequency(epoch)')
     parser.add_argument('--logpath', type=str, default='./log/po3ad_cond_film_ashape_all_test2/best.pth', help='path to save logs')
-    parser.add_argument('--validation', type=bool, default=False, help='Whether to verify the validation set')
+    # parser.add_argument('--validation', type=bool, default=False, help='Whether to verify the validation set')
     parser.add_argument('--checkpoint_name', type=str, default='', help='checkpoint name')
     parser.add_argument('--gpu_id', type=str, default='0', help='gpu id')
+    parser.add_argument('--metrics_md', type=str, default='', help='optional path to save console outputs (metrics/timing) into a markdown file')
 
     # #Dataset setting
     parser.add_argument('--dataset', type=str, default='AnomalyShapeNet', help='datasets')
     parser.add_argument('--category', type=str, default='', help='categories for each class (single)')
     parser.add_argument('--categories', type=str, default='', help='multi-categories for cluster eval, e.g., "all"')
     parser.add_argument('--batch_size', type=int, default=1, help='batch_size for single GPU')
-    parser.add_argument('--data_repeat', type=int, default=100, help='repeat the date for each epoch')
-    parser.add_argument('--mask_num', type=int, default=64)
+    parser.add_argument('--mask_num', type=int, default=32)
+    parser.add_argument('--data_repeat', type=int, default=10, help='repeat the date for each epoch')
+    parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
 
     # DataLoader performance options
     parser.add_argument('--pin_memory', action='store_true', help='enable DataLoader pin_memory')
@@ -32,20 +31,12 @@ def get_parser():
     parser.add_argument('--cache_io', action='store_true', help='cache heavy I/O (meshes, pcd/gt coords) to .npz for faster loading')
     parser.add_argument('--cache_dir', type=str, default='./cache', help='directory to store cached arrays')
 
-    # #Adjust learning rate
-    parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
-    parser.add_argument('--optimizer', type=str, default='Adam', help='Optimizer: Adam, SGD, AdamW')
-    parser.add_argument('--step_epoch', type=int, default=10, help='How many steps apart to decay the learning rate')
-    parser.add_argument('--multiplier', type=float, default=0.5, help='Learning rate decay: lr = lr * multiplier')
-    parser.add_argument('--momentum', type=float, default=0.9, help='momentum for SGD')
-    parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight_decay for SGD')
-
     # #model parameter
     parser.add_argument('--voxel_size', type=float, default=0.03, help='voxel size')
     parser.add_argument('--in_channels', type=int, default=3, help='in channels')
     parser.add_argument('--out_channels', type=int, default=32, help='backbone feat channels')
     parser.add_argument('--class_embed_dim', type=int, default=32, help='class embedding dim used by conditional offset head at eval; must match training')
-    parser.add_argument('--conditional_mode', type=str, default='concat', help='conditional mode for offset head at eval: concat or film')
+    parser.add_argument('--conditional_mode', type=str, default='film', help='conditional mode for offset head at eval: concat or film')
     parser.add_argument('--conditioning_source', type=str, default='auto', help='conditioning source at eval: auto (cluster then true), true (always true category), cluster (predicted cluster), none (no conditioning)')
 
     # contrastive eval params
@@ -55,17 +46,15 @@ def get_parser():
     parser.add_argument('--contrastive_ckpt', type=str, default='./log/contrast_ashape_all_test2/best.pth', help='path to contrastive checkpoint (with prototypes) for cluster assigner')
     parser.add_argument('--cluster_norm_type', type=str, default='minmax', help='cluster/category normalization for scores: minmax, zscore, mad')
     parser.add_argument('--metrics_csv', type=str, default='./result/metrics_debug.csv', help='optional path to save per-cluster/category metrics CSV')
-    parser.add_argument('--eval_category_only', type=str, default='', help='evaluate unified model on a single category (subset test to this category only)')
-    parser.add_argument('--metrics_md', type=str, default='', help='optional path to save console outputs (metrics/timing) into a markdown file')
+   
+    
     
     # confusion matrix visualization
     parser.add_argument('--save_confmat', action='store_true', help='save cluster-vs-class confusion matrix image when cluster assigner is used')
-    parser.add_argument('--confmat_out', type=str, default='', help='output path of the confusion matrix image (png)')
+    parser.add_argument('--confmat_out', type=str, default='./results/confmat.png', help='output path of the confusion matrix image (png)')
 
     # additional evaluation options
-    parser.add_argument('--point_macro_ap', action='store_true', help='compute per-sample point-level AP and report macro average')
     parser.add_argument('--print_pos_rate', action='store_true', help='print positive rate (fraction of anomalous points) for global/cluster/category')
-    parser.add_argument('--sample_norm', action='store_true', help='normalize scores within each sample (instead of cluster/category) when computing per-sample macro AP')
     parser.add_argument('--smooth_knn', type=int, default=16, help='kNN smoothing for point scores (k=0 disables)')
 
     # AUPRO options
@@ -103,6 +92,10 @@ def get_parser():
     parser.add_argument('--ttt_entropy', type=float, default=0.0, help='optional entropy minimization weight (on score distribution)')
     parser.add_argument('--ttt_weak_rotate_deg', type=float, default=2.0, help='weak rotation (deg) for ttt view')
     parser.add_argument('--ttt_weak_jitter', type=float, default=0.001, help='weak jitter sigma for ttt view')
+
+    # Sample-level anomaly score calculation method
+    parser.add_argument('--score_quantile', type=float, default=0.95, help='quantile for sample-level anomaly score calculation (0.0-1.0), e.g., 0.95 means using 95th percentile')
+    parser.add_argument('--score_method', type=str, default='quantile', choices=['mean', 'max', 'quantile'], help='method for sample-level anomaly score calculation: mean, max, or quantile')
 
     args = parser.parse_args()
     return args
