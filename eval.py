@@ -67,7 +67,6 @@ def eval_cluster(cfg):
         # infer embedding
         with torch.no_grad():
             z = model.forward_embed(batch['feat_voxel'], batch['xyz_voxel'])
-            z = F.normalize(z, dim=1)
             logits = torch.matmul(z, proto.T) #计算嵌入向量与所有原型向量的点积
             pred = torch.argmax(logits, dim=1).item() # 取相似度最大的作为预测类别
         # get true class id from path
@@ -179,7 +178,11 @@ def eval(cfgs):
     # optional cluster assigner for normalization
     assigner = None #聚类分配器
     proto = None
-    if getattr(cfg, 'cluster_norm', False):
+    # decide if we need cluster predictions (for conditioning or per-cluster metrics)
+    cond_src_eval = str(getattr(cfg, 'conditioning_source', 'auto')).lower()
+    need_cluster_preds_for_cond = (cond_src_eval in ['cluster', 'auto'])
+    need_assigner = bool(getattr(cfg, 'cluster_norm', False) or need_cluster_preds_for_cond)
+    if need_assigner:
         from network.contrast import POContrast
         # resolve ckpt path
         ckpt_path = cfg.contrastive_ckpt if getattr(cfg, 'contrastive_ckpt', '') else (cfg.logpath + cfg.checkpoint_name)
@@ -195,7 +198,7 @@ def eval(cfgs):
             proto = None
 
     # conditioning source option
-    cond_src = getattr(cfg, 'conditioning_source', 'auto').lower()
+    cond_src = cond_src_eval
     if cond_src not in ['auto', 'true', 'cluster', 'none']:
         cond_src = 'auto'
 
@@ -208,7 +211,10 @@ def eval(cfgs):
         else:
             print('[Cluster] cluster_norm=True but assigner unavailable -> Per-cluster metrics disabled.')
     else:
-        print('[Cluster] cluster_norm=False -> Predicted clusters disabled; using category metrics only.')
+        if need_cluster_preds_for_cond and cluster_assigner_ready:
+            print('[Cluster] using predicted clusters for conditioning only (no per-cluster metrics).')
+        else:
+            print('[Cluster] predicted clusters disabled; using category metrics only.')
 
     # decide normal tag for test set
     if cfg.dataset == 'AnomalyShapeNet':
@@ -329,7 +335,7 @@ def eval(cfgs):
             gt_masks.append(gt_this)
 
         # cluster prediction (before scoring) to decide conditioning id
-        if assigner is not None and proto is not None:
+        if assigner is not None and proto is not None and (need_cluster_preds_for_cond or getattr(cfg, 'cluster_norm', False)):
             with torch.no_grad():
                 import torch.nn.functional as F
                 z = assigner.forward_embed(batch['feat_voxel'], batch['xyz_voxel']) #(1,128) (B,proj_dim)
@@ -653,8 +659,10 @@ def eval(cfgs):
     def normalize_array(x, method):
         x = np.asarray(x)
         if method == 'minmax':
-            d = (np.max(x) - np.min(x)) + 1e-12
-            return (x - np.min(x)) / d
+            x_min = np.min(x)
+            x_max = np.max(x)
+            d = (x_max - x_min) + 1e-12
+            return (x - x_min) / d
         elif method == 'zscore':
             mu = np.mean(x)
             sd = np.std(x) + 1e-12
@@ -664,8 +672,10 @@ def eval(cfgs):
             mad = np.median(np.abs(x - med)) + 1e-12
             return (x - med) / mad
         else:
-            d = (np.max(x) - np.min(x)) + 1e-12
-            return (x - np.min(x)) / d
+            x_min = np.min(x)
+            x_max = np.max(x)
+            d = (x_max - x_min) + 1e-12
+            return (x - x_min) / d
 
     def compute_group_metrics(group_map):
         stats = {}
@@ -717,8 +727,10 @@ def eval(cfgs):
             auc_roc_ = safe_auc_roc(np.array(labels_), np.array(scores_))
             auc_pr_ = safe_ap(np.array(labels_), np.array(scores_))
             point_all = np.concatenate(masks_, axis=0)
-            denom_ = (np.max(point_all) - np.min(point_all)) + 1e-12
-            point_all = (point_all - np.min(point_all)) / denom_
+            p_min = np.min(point_all)
+            p_max = np.max(point_all)
+            denom_ = (p_max - p_min) + 1e-12
+            point_all = (point_all - p_min) / denom_
             gt_all_ = np.concatenate(gt_masks, axis=0)
             point_auc_roc_ = safe_auc_roc(gt_all_, point_all)
             point_auc_pr_ = safe_ap(gt_all_, point_all)
@@ -744,8 +756,10 @@ def eval(cfgs):
             auc_pr = safe_ap(labels, scores)
             point_pred_all = np.concatenate(pred_masks, axis=0)
             # global min-max
-            denom = (np.max(point_pred_all) - np.min(point_pred_all)) + 1e-12
-            point_pred_all = (point_pred_all - np.min(point_pred_all)) / denom
+            p_min = np.min(point_pred_all)
+            p_max = np.max(point_pred_all)
+            denom = (p_max - p_min) + 1e-12
+            point_pred_all = (point_pred_all - p_min) / denom
             gt_all = np.concatenate(gt_masks, axis=0)
             point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
             point_auc_pr = safe_ap(gt_all, point_pred_all)
@@ -827,8 +841,10 @@ def eval(cfgs):
                     print("auc_roc is not in locals, recomputing this metric")
                 if 'point_auc_roc' not in locals():
                     point_pred_all = np.concatenate(pred_masks, axis=0)
-                    denom = (np.max(point_pred_all) - np.min(point_pred_all)) + 1e-12
-                    point_pred_all = (point_pred_all - np.min(point_pred_all)) / denom
+                    p_min = np.min(point_pred_all)
+                    p_max = np.max(point_pred_all)
+                    denom = (p_max - p_min) + 1e-12
+                    point_pred_all = (point_pred_all - p_min) / denom
                     gt_all = np.concatenate(gt_masks, axis=0)
                     point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
                     print("point_auc_roc is not in locals, recomputing this metric")
