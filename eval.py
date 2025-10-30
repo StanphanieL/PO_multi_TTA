@@ -416,11 +416,12 @@ def eval(cfgs):
                 print(f'[smooth_knn] failed to build index: {e}')
                 inds = None
 
-        # pre-TTA mask and optional smoothing
-        pred_mask_pre = pred_mask_base
+        # pre-TTA mask (raw) and optional smoothed copy for metrics only
+        pred_mask_pre_raw = pred_mask_base  # do not smooth the raw mask used for TTA fusion
+        pred_mask_pre = pred_mask_pre_raw
         if inds is not None:
             try:
-                pred_mask_pre = pred_mask_pre[inds].mean(axis=1)
+                pred_mask_pre = pred_mask_pre_raw[inds].mean(axis=1)
             except Exception as e:
                 print(f'[smooth_knn] apply(pre) failed: {e}')
 
@@ -484,8 +485,8 @@ def eval(cfgs):
                 print(f'[TTT] failed: {e}')
             ttt_time_sum += (time.time() - t_ttt0)
 
-        # TTA multi-view geometric augmentations -> post mask
-        pred_mask_post = pred_mask_pre.copy()
+        # TTA multi-view geometric augmentations -> post mask (start from raw)
+        pred_mask_post = pred_mask_pre_raw.copy()
         if getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0:
             import math
             import MinkowskiEngine as ME
@@ -527,11 +528,11 @@ def eval(cfgs):
             if len(tta_masks) > 0:
                 post_infer_time_sum += tta_time_local
                 if getattr(cfg, 'tta_reduce', 'mean').lower() == 'max':
-                    pred_mask_post = np.maximum.reduce([pred_mask_pre] + tta_masks)
+                    pred_mask_post = np.maximum.reduce([pred_mask_pre_raw] + tta_masks)
                 else:
-                    pred_mask_post = (pred_mask_pre + np.sum(np.stack(tta_masks, axis=0), axis=0)) / (len(tta_masks) + 1.0)
+                    pred_mask_post = (pred_mask_pre_raw + np.sum(np.stack(tta_masks, axis=0), axis=0)) / (len(tta_masks) + 1.0)
 
-        # post smoothing
+        # post smoothing (single pass)
         if inds is not None:
             try:
                 pred_mask_post = pred_mask_post[inds].mean(axis=1)
