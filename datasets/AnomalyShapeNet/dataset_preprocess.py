@@ -23,6 +23,17 @@ class Dataset:
         # perf options
         self.pin_memory = getattr(cfg, 'pin_memory', False)
         self.prefetch_factor = getattr(cfg, 'prefetch_factor', 2)
+        # region-style pseudo anomaly options
+        self.region_anom_enable = bool(getattr(cfg, 'region_anom_enable', False))
+        self.region_anom_prob = float(getattr(cfg, 'region_anom_prob', 0.7))
+        self.region_K_max = int(getattr(cfg, 'region_K_max', 3))
+        self.region_area_min = float(getattr(cfg, 'region_area_min', 0.05))
+        self.region_area_max = float(getattr(cfg, 'region_area_max', 0.25))
+        self.region_soft_min = float(getattr(cfg, 'region_soft_min', 0.05))
+        self.region_soft_max = float(getattr(cfg, 'region_soft_max', 0.2))
+        self.region_amp_min = float(getattr(cfg, 'region_amp_min', 0.06))
+        self.region_amp_max = float(getattr(cfg, 'region_amp_max', 0.12))
+        self.region_mix_sign_prob = float(getattr(cfg, 'region_mix_sign_prob', 0.2))
         # cache options
         self.cache_io = getattr(cfg, 'cache_io', False)
         self.cache_dir = os.path.join(getattr(cfg, 'cache_dir', './cache'), 'AnomalyShapeNet')
@@ -140,6 +151,67 @@ class Dataset:
 
         return new_points
 
+    def generate_region_anomaly(self, xyz: np.ndarray, normals: np.ndarray):
+        """Plateau-style large-area convex/concave anomalies with soft boundary.
+        Returns new_xyz, gt_offset
+        """
+        N = xyz.shape[0]
+        if N == 0:
+            return xyz.copy(), np.zeros_like(xyz)
+        # unit normals magnitude safeguard
+        nrm = normals
+        if nrm is None or nrm.shape[0] != N:
+            # fallback: approximate by zeros (no move)
+            nrm = np.zeros_like(xyz, dtype=np.float32)
+        else:
+            nn = np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-8
+            nrm = nrm / nn
+        # choose K regions
+        K = max(1, int(np.random.randint(1, max(2, self.region_K_max+1))))
+        offset = np.zeros_like(xyz, dtype=np.float32)
+        # precompute spatial scale
+        xyz_min = xyz.min(axis=0); xyz_max = xyz.max(axis=0)
+        scale = float(np.linalg.norm(xyz_max - xyz_min)) + 1e-8
+        for k in range(K):
+            # center index
+            ci = np.random.randint(0, N)
+            c = xyz[ci]
+            # pick target area fraction and derive radius by percentile of distances
+            alpha = float(np.random.uniform(self.region_area_min, self.region_area_max))
+            # distance to center
+            d = np.linalg.norm(xyz - c, axis=1)
+            # radius so that roughly alpha*N points are inside
+            r = np.percentile(d, min(99.0, max(1.0, alpha*100.0))) + 1e-8
+            soft = float(np.random.uniform(self.region_soft_min, self.region_soft_max))
+            r_hard = r * (1.0 - soft)
+            # amplitude and sign
+            A = float(np.random.uniform(self.region_amp_min, self.region_amp_max))
+            sign = 1.0 if (np.random.rand() < 0.5) else -1.0
+            # soft plateau weight
+            w = np.zeros((N,), dtype=np.float32)
+            inner = d <= r_hard
+            w[inner] = 1.0
+            band = (d > r_hard) & (d <= r)
+            t = (r - d[band]) / max(1e-6, (r - r_hard))
+            # cosine falloff for smooth boundary
+            w[band] = 0.5 * (1.0 - np.cos(np.clip(t, 0.0, 1.0) * np.pi))
+            # optional mixed-sign subregion
+            if np.random.rand() < self.region_mix_sign_prob:
+                # pick a subcenter and smaller radius
+                cj = xyz[np.random.randint(0, N)]
+                dj = np.linalg.norm(xyz - cj, axis=1)
+                rj = 0.5 * r
+                mask_j = dj <= rj
+                # flip sign inside
+                sign_map = np.ones((N,), dtype=np.float32) * sign
+                sign_map[mask_j] = -sign
+            else:
+                sign_map = np.ones((N,), dtype=np.float32) * sign
+            disp = (A * w * sign_map)[:, None] * nrm
+            offset += disp.astype(np.float32)
+        new_xyz = xyz + offset
+        return new_xyz.astype(np.float32), offset.astype(np.float32)
+
     def contrastiveMerge(self, id):
         file_name = []
         labels = []
@@ -250,21 +322,22 @@ class Dataset:
 
             xyz_original.append(torch.from_numpy(xyz))
 
-            num_shift = 1
-            mask_range = np.arange(0, self.mask_num // 2)
-            shift_index = np.random.choice(mask_range, num_shift, replace=False)
-            mask[np.isin(mask, shift_index)] = -1
-
-            shift_xyz = xyz[mask == -1].copy()
-            shift_normal = normal[mask == -1].copy()
-            shifted_xyz = self.generate_pseudo_anomaly(shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
-
-            new_xyz = xyz.copy()
-
-            new_xyz[mask == -1] = shifted_xyz
-            gt_offset = new_xyz - xyz
+            # Choose between legacy Norm-AS and region-style anomaly
+            use_region = self.region_anom_enable and (random.random() < self.region_anom_prob)
+            if use_region:
+                new_xyz, gt_offset = self.generate_region_anomaly(xyz, normal)
+            else:
+                num_shift = 1
+                mask_range = np.arange(0, self.mask_num // 2)
+                shift_index = np.random.choice(mask_range, num_shift, replace=False)
+                mask[np.isin(mask, shift_index)] = -1
+                shift_xyz = xyz[mask == -1].copy()
+                shift_normal = normal[mask == -1].copy()
+                shifted_xyz = self.generate_pseudo_anomaly(shift_xyz, shift_normal, centers[shift_index[0]], distance_to_move=np.random.uniform(0.06, 0.12))
+                new_xyz = xyz.copy()
+                new_xyz[mask == -1] = shifted_xyz
+                gt_offset = new_xyz - xyz
             gt_offset_list.append(torch.from_numpy(gt_offset))
-
             xyz_shifted.append(torch.from_numpy(new_xyz))
 
             quantized_coords, feats_all, index, inverse_index = ME.utils.sparse_quantize(new_xyz, new_xyz,

@@ -23,6 +23,18 @@ def get_parser():
     parser.add_argument('--data_repeat', type=int, default=10, help='repeat the date for each epoch')
     parser.add_argument('--mask_num', type=int, default=64)
 
+    # Region-style pseudo anomaly (AnomalyShapeNet) for large-area convex/concave
+    parser.add_argument('--region_anom_enable', action='store_true', help='enable region-style pseudo anomaly (plateau + soft boundary) for AnomalyShapeNet')
+    parser.add_argument('--region_anom_prob', type=float, default=0.7, help='probability to use region-style anomaly instead of legacy Norm-AS per sample')
+    parser.add_argument('--region_K_max', type=int, default=3, help='max number of anomaly regions per sample')
+    parser.add_argument('--region_area_min', type=float, default=0.05, help='min target area fraction (relative to points) per region')
+    parser.add_argument('--region_area_max', type=float, default=0.25, help='max target area fraction (relative to points) per region')
+    parser.add_argument('--region_soft_min', type=float, default=0.05, help='min soft boundary ratio (fraction of region radius)')
+    parser.add_argument('--region_soft_max', type=float, default=0.2, help='max soft boundary ratio (fraction of region radius)')
+    parser.add_argument('--region_amp_min', type=float, default=0.06, help='min displacement amplitude (in normalized units)')
+    parser.add_argument('--region_amp_max', type=float, default=0.12, help='max displacement amplitude (in normalized units)')
+    parser.add_argument('--region_mix_sign_prob', type=float, default=0.2, help='probability to mix convex/concave signs within regions')
+
     # DataLoader performance options
     parser.add_argument('--pin_memory', action='store_true', help='enable DataLoader pin_memory')
     parser.add_argument('--prefetch_factor', type=int, default=2, help='DataLoader prefetch_factor (workers>0)')
