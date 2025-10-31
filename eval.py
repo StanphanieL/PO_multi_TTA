@@ -1080,6 +1080,56 @@ def eval(cfgs):
             print(f'[Metrics CSV] saved to {csv_path}')
         except Exception as e:
             print(f'[Metrics CSV] failed to save: {e}')
+    else:
+        # No cluster assigner available -> still report per-category metrics using true categories
+        try:
+            from collections import defaultdict
+            norm_type = getattr(cfg, 'cluster_norm_type', 'minmax')
+            cat_groups = defaultdict(list)
+            for idx, tc in enumerate(true_cats):
+                cat_groups[tc].append(idx)
+            print(f"\n[Per-Category metrics (by true category) with category-wise {norm_type} normalization]")
+            cat_stats, macro_cat = compute_group_metrics(cat_groups)
+            for tc, v in cat_stats.items():
+                if getattr(cfg, 'print_pos_rate', False):
+                    print(f'  [cat {tc}] N={v[4]} objAUC={v[0]} ptAUC={v[1]} objAP={v[2]} ptAP={v[3]} pos_rate={v[5]:.6f}' if v[5] is not None else f'  [cat {tc}] N={v[4]} objAUC={v[0]} ptAUC={v[1]} objAP={v[2]} ptAP={v[3]}')
+                else:
+                    print(f'  [cat {tc}] N={v[4]} objAUC={v[0]} ptAUC={v[1]} objAP={v[2]} ptAP={v[3]}')
+            if macro_cat is not None:
+                print(f'  [category-macro] objAUC={macro_cat[0]} ptAUC={macro_cat[1]} objAP={macro_cat[2]} ptAP={macro_cat[3]}')
+            # Optional CSV export for category-only case
+            csv_path = getattr(cfg, 'metrics_csv', '')
+            if csv_path:
+                try:
+                    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+                    # ensure global metrics
+                    if 'auc_roc' not in locals() or 'point_auc_roc' not in locals() or 'auc_pr' not in locals() or 'point_auc_pr' not in locals():
+                        labels_arr = np.array([y for y, _ in label_score])
+                        scores_arr = np.array([s for _, s in label_score])
+                        auc_roc = safe_auc_roc(labels_arr, scores_arr)
+                        auc_pr = safe_ap(labels_arr, scores_arr)
+                        point_pred_all = np.concatenate(pred_masks, axis=0)
+                        pmin, pmax = np.min(point_pred_all), np.max(point_pred_all)
+                        denom = (pmax - pmin) + 1e-12
+                        point_pred_all = (point_pred_all - pmin) / denom
+                        gt_all = np.concatenate(gt_masks, axis=0)
+                        point_auc_roc = safe_auc_roc(gt_all, point_pred_all)
+                        point_auc_pr = safe_ap(gt_all, point_pred_all)
+                    with open(csv_path, 'w', newline='') as f:
+                        import csv
+                        writer = csv.writer(f)
+                        writer.writerow(['section','id','N','objAUC','ptAUC','objAP','ptAP','norm','pos_rate'])
+                        pos_rate_global = float(np.mean(np.concatenate(gt_masks))) if getattr(cfg, 'print_pos_rate', False) else ''
+                        writer.writerow(['global','all',len(labels),auc_roc,point_auc_roc,auc_pr,point_auc_pr,'global-minmax',pos_rate_global])
+                        for tc, v in sorted(cat_stats.items(), key=lambda x: x[0]):
+                            writer.writerow(['category',tc,v[4],v[0],v[1],v[2],v[3],norm_type,'' if v[5] is None else v[5]])
+                        if macro_cat is not None:
+                            writer.writerow(['category-macro','avg','',macro_cat[0],macro_cat[1],macro_cat[2],macro_cat[3],norm_type,''])
+                    print(f'[Metrics CSV] saved to {csv_path}')
+                except Exception as e:
+                    print(f'[Metrics CSV] failed to save: {e}')
+        except Exception as e:
+            print(f'[Per-Category] failed: {e}')
     # restore stdout and persist md capture if requested (normal path)
     if md_capture is not None:
         sys.stdout = orig_stdout
