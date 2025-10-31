@@ -474,14 +474,11 @@ def eval(cfgs):
 
         if tag in sample_name:
             gt_this = np.zeros(batch['xyz_original'].shape[0])
-            gt_masks.append(gt_this)
         else:
             if cfg.dataset == 'AnomalyShapeNet':
                 gt_mask_path = f'datasets/AnomalyShapeNet/dataset/pcd/{true_cat}/GT/'
                 gt_this = np.loadtxt(gt_mask_path + sample_name + '.txt', delimiter=',')[:, 3:].squeeze(1)
             elif cfg.dataset == 'Real3D':
-                # gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{true_cat}/gt/'
-                # gt_this = np.loadtxt(gt_mask_path + sample_name + '.txt')[:, 3:].squeeze(1)
                 gt_mask_path = f'datasets/Real3D/Real3D-AD-PCD/{true_cat}/gt/'
                 gt_file = gt_mask_path + sample_name + '.txt'
                 try:
@@ -493,13 +490,60 @@ def eval(cfgs):
                     gt_this = np.array(arr[-1:]).reshape(-1)
                 else:
                     gt_this = arr[:, -1].reshape(-1)
+
+        # Optional: remove dominant support plane for Real3D before model forward
+        xyz_np_raw = batch['xyz_original'].numpy()
+        use_clean = False
+        keep_mask = np.ones(xyz_np_raw.shape[0], dtype=bool)
+        xyz_np = xyz_np_raw
+        fwd_batch = batch
+        if cfg.dataset == 'Real3D' and getattr(cfg, 'platform_remove', False):
+            try:
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(xyz_np_raw.astype(np.float64))
+                plane_model, inliers = pcd.segment_plane(distance_threshold=float(getattr(cfg, 'platform_dist_thresh', 0.003)),
+                                                         ransac_n=int(getattr(cfg, 'platform_ransac_n', 3)),
+                                                         num_iterations=int(getattr(cfg, 'platform_ransac_iter', 200)))
+                if inliers:
+                    a, b, c, d = plane_model
+                    nz = float(abs(c)) / max(1e-12, (a*a + b*b + c*c) ** 0.5)
+                    ratio = len(inliers) / xyz_np_raw.shape[0]
+                    if nz >= float(getattr(cfg, 'platform_normal_z', 0.8)) and ratio >= float(getattr(cfg, 'platform_min_ratio', 0.05)):
+                        keep_mask[np.array(inliers, dtype=np.int64)] = False
+                        if np.any(keep_mask):
+                            xyz_np = xyz_np_raw[keep_mask]
+                            # re-quantize cleaned points
+                            import MinkowskiEngine as ME
+                            q, f, index, inv = ME.utils.sparse_quantize(xyz_np.astype(np.float32), xyz_np.astype(np.float32),
+                                                                        quantization_size=cfg.voxel_size,
+                                                                        return_index=True, return_inverse=True)
+                            xyz_voxel_t, feat_voxel_t = ME.utils.sparse_collate([q],[f])
+                            if isinstance(inv, np.ndarray):
+                                v2p_t = torch.from_numpy(inv).long()
+                            elif torch.is_tensor(inv):
+                                v2p_t = inv.long().cpu()
+                            else:
+                                v2p_t = torch.as_tensor(inv, dtype=torch.long)
+                            batch_count_t = torch.tensor([0, xyz_np.shape[0]], dtype=torch.int64)
+                            fwd_batch = {'xyz_voxel': xyz_voxel_t, 'feat_voxel': feat_voxel_t, 'v2p_index': v2p_t, 'batch_count': batch_count_t}
+                            use_clean = True
+            except Exception as _e:
+                print(f'[Eval][PlatformRemove] failed: {_e}')
+
+        # append GT aligned to kept points only for Real3D; otherwise original
+        if cfg.dataset == 'Real3D':
+            try:
+                gt_masks.append(gt_this[keep_mask] if use_clean else gt_this)
+            except Exception:
+                gt_masks.append(gt_this)
+        else:
             gt_masks.append(gt_this)
 
         # cluster prediction (before scoring) to decide conditioning id
         if assigner is not None and proto is not None and (need_cluster_preds_for_cond or getattr(cfg, 'cluster_norm', False)):
             with torch.no_grad():
                 import torch.nn.functional as F
-                z = assigner.forward_embed(batch['feat_voxel'], batch['xyz_voxel']) #(1,128) (B,proj_dim)
+                z = assigner.forward_embed((fwd_batch if use_clean else batch)['feat_voxel'], (fwd_batch if use_clean else batch)['xyz_voxel']) #(1,128) (B,proj_dim)
                 # z = F.normalize(z, dim=1)
                 logits = torch.matmul(z, proto.T)
                 cid = torch.argmax(logits, dim=1).item()
@@ -557,12 +601,11 @@ def eval(cfgs):
 
         # baseline forward (pre-TTA)
         t_pre0 = time.time()
-        score, pred_mask_tensor = eval_fn(batch, model, category_ids=cond_ids, 
+        score, pred_mask_tensor = eval_fn((fwd_batch if use_clean else batch), model, category_ids=cond_ids, 
                                           quantile=getattr(cfg, 'score_quantile', 0.95),
                                           score_method=getattr(cfg, 'score_method', 'quantile'))
         pre_infer_time_sum += (time.time() - t_pre0)
         pred_mask_base = pred_mask_tensor.detach().cpu().abs().sum(dim=-1).numpy()
-        xyz_np = batch['xyz_original'].numpy()
         xyz_list.append(xyz_np)
 
         # Prepare optional smoothing indices once
@@ -651,7 +694,7 @@ def eval(cfgs):
         if getattr(cfg, 'tta_views', 0) and cfg.tta_views > 0:
             import math
             import MinkowskiEngine as ME
-            base_xyz = batch['xyz_original'].numpy()
+            base_xyz = xyz_np
             tta_masks = []
             tta_time_local = 0.0
             for _ in range(int(cfg.tta_views)):
@@ -734,7 +777,7 @@ def eval(cfgs):
                          xyz=xyz_np.astype(np.float32),
                          score=pred_mask_post.astype(np.float32),
                          score_pre=pred_mask_pre.astype(np.float32),
-                         gt=gt_this.astype(np.float32) if 'gt_this' in locals() else None,
+                         gt=(gt_this[keep_mask] if (cfg.dataset=='Real3D' and use_clean) else gt_this).astype(np.float32) if 'gt_this' in locals() else None,
                          label=np.array(y_list, dtype=np.int64))
             except Exception as e:
                 print(f'[NPZ] save failed: {e}')
@@ -912,6 +955,8 @@ def eval(cfgs):
             auc_pr = g_obj_ap_post
             point_auc_roc = g_pt_auc_post
             point_auc_pr = g_pt_ap_post
+            # Ensure gt_all is defined for all execution paths
+            gt_all = np.concatenate(gt_masks, axis=0)
         else:
             # If TTA is not enabled, compute global metrics once
             auc_roc = safe_auc_roc(labels, scores)
@@ -996,6 +1041,10 @@ def eval(cfgs):
                 writer = csv.writer(f)
                 writer.writerow(['section','id','N','objAUC','ptAUC','objAP','ptAP','norm','pos_rate'])
                 # global
+                # Ensure gt_all is defined for all execution paths
+                if 'gt_all' not in locals():
+                    gt_all = np.concatenate(gt_masks, axis=0)
+                    print("gt_all is not in locals, defining it now")
                 pos_rate_global = float(np.mean(gt_all)) if getattr(cfg, 'print_pos_rate', False) else ''
                 # Ensure variables are defined
                 if 'auc_roc' not in locals():

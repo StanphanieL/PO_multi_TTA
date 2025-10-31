@@ -57,6 +57,14 @@ def get_parser():
     parser.add_argument('--print_pos_rate', action='store_true', help='print positive rate (fraction of anomalous points) for global/cluster/category')
     parser.add_argument('--smooth_knn', type=int, default=16, help='kNN smoothing for point scores (k=0 disables)')
 
+    # Real3D support-plane removal (RANSAC) before model forward
+    parser.add_argument('--platform_remove', action='store_true', help='remove dominant support plane by RANSAC for Real3D at eval time')
+    parser.add_argument('--platform_dist_thresh', type=float, default=0.003, help='RANSAC inlier distance threshold')
+    parser.add_argument('--platform_min_ratio', type=float, default=0.05, help='minimum inlier ratio to accept a plane as platform')
+    parser.add_argument('--platform_normal_z', type=float, default=0.8, help='require |n·z| >= this to regard plane as platform')
+    parser.add_argument('--platform_ransac_n', type=int, default=3, help='RANSAC_n for plane fitting')
+    parser.add_argument('--platform_ransac_iter', type=int, default=200, help='iterations for plane fitting')
+
     # AUPRO options
     parser.add_argument('--compute_aupro', action='store_true', help='compute AUPRO (PRO area under FPR in a range)')
     parser.add_argument('--aupro_fpr_max', type=float, default=0.3, help='FPR upper bound for AUPRO (e.g., 0.3 for 0~30%)')
@@ -81,7 +89,7 @@ def get_parser():
 
     # Prototype EMA during eval (cluster assigner required)
     parser.add_argument('--proto_ema', action='store_true', help='enable prototype EMA update during evaluation')
-    parser.add_argument('--proto_ema_m', type=float, default=0.99, help='prototype EMA momentum (higher=slower update)')
+    parser.add_argument('--proto_ema_m', type=float, default=0.95, help='prototype EMA momentum (higher=slower update)')
     parser.add_argument('--proto_ema_tau', type=float, default=0.8, help='confidence threshold on predicted cluster prob to update prototype')
 
     # Test-Time Training (light adaptation on last head)
